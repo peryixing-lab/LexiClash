@@ -1,0 +1,11 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "LexiClash — HarmonyOS native proxy client, evolved from OHClash",
+  "main": "",
+  "author": "peryixing-lab and contributors",
+  "license": "GPL-3.0",
+  "dependencies": {
+    "libclash_bridge.so": "file:./src/main/cpp/types/libclash_bridge"
+  }
+}

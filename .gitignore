@@ -1,0 +1,74 @@
+# Dependencies, local tools and IDE caches
+node_modules/
+oh_modules/
+.idea/
+.vscode/
+.hvigor/
+.preview/
+.cxx/
+.test/
+.appanalyzer/
+.agents/
+.codex/
+.aws/
+/local.properties
+
+# Build products and generated native interfaces
+build/
+dist/
+out/
+coverage/
+*.hap
+*.hsp
+*.har
+*.app
+*.hqf
+*.so
+*.a
+*.o
+/release/
+/releases/
+
+# Personal signing material and secrets
+/build-profile.local.json5
+/build-profile.*.local.json5
+*.p12
+*.pfx
+*.p7b
+*.cer
+*.csr
+*.jks
+*.keystore
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+secrets/
+signing/
+certificates/
+
+# Local logs, device captures and old development notes
+*.log
+*.hprof
+*.heapsnapshot
+*.trace
+/docs/verification/
+/docs/runtime-audit-*.md
+/docs/branding.md
+
+# Upstream integration fixtures with authentication fields
+/native/core/Clash.Meta/docs/config.yaml
+/native/core/Clash.Meta/test/config/
+
+# OS and editor temporary files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# Required prebuilt ARM64 core, explicitly included for a ready-to-open checkout
+!/entry/libs/arm64-v8a/libflclash_core.so

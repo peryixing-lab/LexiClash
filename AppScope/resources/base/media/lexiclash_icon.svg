@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>LexiClash</title>
+  <rect width="1024" height="1024" rx="240" fill="#FFE1C2"/>
+  <g transform="translate(71.68 76) scale(.86)" fill="none" stroke-width="78" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M518 328l36-36c54-54 138-54 192 0s54 138 0 192l-96 96c-54 54-138 54-192 0" stroke="#D76728"/>
+    <path d="M506 712l-36 36c-54 54-138 54-192 0s-54-138 0-192l96-96c54-54 138-54 192 0" stroke="#EA8C46"/>
+  </g>
+  <circle cx="790" cy="202" r="62" fill="#FFFFFF" opacity=".35"/>
+  <circle cx="790" cy="202" r="36" fill="#FFFFFF"/>
+</svg>

@@ -1,0 +1,28 @@
+# UI verification fixture. These reserved .invalid hosts cannot forward traffic.
+mixed-port: 7890
+allow-lan: false
+mode: rule
+proxies:
+  - name: 测试入口
+    type: socks5
+    server: entry.invalid
+    port: 1080
+    username: demo
+    password: demo-only
+  - name: 测试出口
+    type: http
+    server: exit.invalid
+    port: 8080
+  - name: 测试中转
+    type: socks5
+    server: middle.invalid
+    port: 1080
+proxy-groups:
+  - name: 手动选择
+    type: select
+    proxies: [测试入口, 测试出口, 测试中转, DIRECT]
+  - name: 其他规则组
+    type: select
+    proxies: [测试入口, 测试中转, DIRECT]
+rules:
+  - MATCH,手动选择

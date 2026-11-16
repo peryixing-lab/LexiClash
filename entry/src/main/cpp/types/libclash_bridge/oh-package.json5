@@ -1,0 +1,6 @@
+{
+  "name": "libclash_bridge.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "FlClash mihomo Core NAPI Bridge for HarmonyOS NEXT"
+}

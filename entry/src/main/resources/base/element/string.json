@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "基于 ClashMeta (mihomo) 的多平台代理客户端鸿蒙版"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "LexiClash · HarmonyOS NEXT"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "LexiClash"
+    }
+  ]
+}
