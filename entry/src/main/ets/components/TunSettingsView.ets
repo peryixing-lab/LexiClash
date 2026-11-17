@@ -7,9 +7,6 @@ export struct TunSettingsView {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop @Watch('syncSettings') revisionTick: number = 0;
   @State active: boolean = false;
-  @State tunEnabled: boolean = true;
-  @State localConnected: boolean = false;
-  @State proxyAddress: string = '127.0.0.1:7890';
   @State busy: boolean = false;
   @State connecting: boolean = false;
   @State selectedStack: LexiTunStack = 'system';
@@ -29,9 +26,6 @@ export struct TunSettingsView {
 
   syncSettings(): void {
     this.active = this.store.vpnEnabled;
-    this.tunEnabled = this.store.tunEnabled;
-    this.localConnected = this.store.isRunning && !this.store.vpnEnabled;
-    this.proxyAddress = `127.0.0.1:${this.store.mixedPort}`;
     this.busy = this.store.isVpnTransitioning;
     this.connecting = this.store.coreStatus === 'connecting';
     this.selectedStack = this.store.tunStack;
@@ -49,9 +43,8 @@ export struct TunSettingsView {
     if (this.busy) {
       return this.connecting ? this.text('正在启动 TUN…', 'Starting TUN…') : this.text('正在关闭 TUN…', 'Stopping TUN…');
     }
-    return this.active ? this.text('TUN 已连接', 'TUN is connected')
-      : (this.localConnected ? this.text('本地代理已连接', 'Local proxy is connected')
-        : this.text('代理未连接，模式在下次连接时生效', 'Disconnected. The mode applies on the next connection.'));
+    return this.active ? this.text('系统 VPN 已连接 · TUN 已启用', 'System VPN connected · TUN active')
+      : this.text('系统 VPN 未连接', 'System VPN disconnected');
   }
 
   private changeMtu(input: string): void {
@@ -65,22 +58,13 @@ export struct TunSettingsView {
     this.syncSettings();
   }
 
-  private async switchTun(nextEnabled: boolean): Promise<void> {
-    this.feedback = '';
-    const operation: Promise<boolean> = this.store.setTunModeEnabledAsync(nextEnabled);
-    this.syncSettings();
-    const ok: boolean = await operation;
-    if (!ok) { this.feedback = this.store.lastOperationError; }
-    this.syncSettings();
-  }
-
   private async applySettings(): Promise<void> {
     this.feedback = '';
     const operation: Promise<boolean> = this.store.applyTunSettingsAsync();
     this.syncSettings();
     const ok: boolean = await operation;
     this.feedback = ok ? (this.active ? this.text('TUN 设置已应用', 'TUN settings applied')
-      : this.text('设置已保存，下次开启 TUN 时生效', 'Saved. Applies the next time TUN starts.')) : this.store.lastOperationError;
+      : this.text('设置已保存，下次连接 VPN 时生效', 'Saved. Applies the next VPN connection.')) : this.store.lastOperationError;
     this.syncSettings();
   }
 
@@ -88,29 +72,21 @@ export struct TunSettingsView {
     Column({ space: 12 }) {
       Row({ space: 12 }) {
         Column({ space: 5 }) {
-          Text(this.text('TUN 模式', 'TUN mode'))
+          Text(this.text('TUN 设置', 'TUN settings'))
             .fontSize(17).fontWeight(FontWeight.Bold).fontColor(this.palette.onSurface)
           Text(this.statusText()).fontSize(13).fontColor(this.active ? this.palette.ok : this.palette.onSurfaceVariant)
           if (this.active) {
             Text(this.activeSummary).fontSize(12).fontColor(this.palette.onSurfaceVariant)
           }
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: $$this.tunEnabled })
-          .id('tun-mode-toggle').selectedColor(this.palette.primary)
-          .accessibilityText(this.text('启用 TUN 模式', 'Enable TUN mode'))
-          .enabled(!this.busy && !this.store.isChainConnecting && (this.tunEnabled || this.mtuError.length === 0))
-          .onChange((nextEnabled: boolean): void => { this.switchTun(nextEnabled); })
       }.width('100%').padding(18).backgroundColor(this.palette.card).borderRadius(22)
 
       Column({ space: 8 }) {
         Text(this.text('通过鸿蒙系统 VPN 创建虚拟网卡，接管 TCP、UDP 和 DNS 流量，无需为各应用手动设置 HTTP 代理。',
           'Creates a virtual network interface through the system VPN to handle TCP, UDP and DNS traffic. Apps do not need manual HTTP proxy settings.'))
           .fontSize(13).fontColor(this.palette.onSurfaceVariant)
-        Text(this.text('开启后通过系统 VPN 接管流量；关闭后仍可连接，使用本地 HTTP/SOCKS 代理。运行中切换会重连并保留节点和代理链。分应用黑白名单仅在 TUN 模式生效。',
-          'When enabled, the system VPN captures traffic. When disabled, local HTTP/SOCKS proxy connections remain available. Switching reconnects while preserving proxies and the chain. App routing applies only in TUN mode.'))
-          .fontSize(12).fontColor(this.palette.onSurfaceVariant)
-        Text(this.text(`本地代理地址：${this.proxyAddress}。关闭 TUN 时，需要在支持代理的应用或网络设置中手动填写该地址。`,
-          `Local proxy: ${this.proxyAddress}. With TUN off, configure this address in an app or network setting that supports proxies.`))
+        Text(this.text('鸿蒙系统 VPN 依赖 TUN 虚拟网卡，连接时始终启用。请在仪表盘连接或断开 VPN；分应用黑白名单决定哪些应用进入 VPN。',
+          'HarmonyOS system VPN requires a TUN interface, which is always enabled when connected. Connect or disconnect from the dashboard. App routing decides which apps enter the VPN.'))
           .fontSize(12).fontColor(this.palette.onSurfaceVariant)
       }.alignItems(HorizontalAlign.Start).width('100%').padding(18)
       .backgroundColor(this.palette.card).borderRadius(22)
@@ -161,7 +137,7 @@ export struct TunSettingsView {
         ? this.text('存在待应用的设置。应用时会短暂断开并重连，保留当前节点和代理链。',
           'Changes are pending. Applying briefly reconnects the VPN and preserves the selected proxies and chain.')
         : this.text('当前 TUN 正在使用这些设置', 'The active TUN uses these settings.'))
-        : this.text('设置自动保存，下次开启 TUN 时生效', 'Settings are saved automatically for the next TUN connection.'))
+        : this.text('设置自动保存，下次连接 VPN 时生效', 'Settings are saved automatically for the next TUN connection.'))
         .fontSize(12).fontColor(this.palette.onSurfaceVariant).width('100%')
       Button(this.active ? this.text('应用并重连 TUN', 'Apply and reconnect TUN') : this.text('保存设置', 'Save settings'))
         .id('tun-apply-button').height(46).width('100%')

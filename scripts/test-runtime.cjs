@@ -40,10 +40,6 @@ function runtime({
       vpnState.nativeLaunchCalls.push({ filesDir, secret });
       return vpnHooks.launchAsync ? vpnHooks.launchAsync(filesDir, secret) : '';
     },
-    launchProxyAsync: async (filesDir, secret) => {
-      vpnState.proxyLaunchCalls.push({ filesDir, secret });
-      return vpnHooks.launchProxyAsync ? vpnHooks.launchProxyAsync(filesDir, secret) : '';
-    },
     startTunAsync: async fd => {
       vpnState.nativeStartTunCalls.push(fd);
       return vpnHooks.startTunAsync ? vpnHooks.startTunAsync(fd) : true;
@@ -1413,7 +1409,7 @@ test('TUN: invalid settings never release the old session or create a system int
   } finally { r.dispose(); }
 });
 
-test('TUN: mode preference is separate from connection and live mode changes preserve app routing and chain', async () => {
+test('TUN: all connections use the system VPN and settings reconnect preserves app routing and chain', async () => {
   let extension;
   const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
     onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
@@ -1421,7 +1417,6 @@ test('TUN: mode preference is separate from connection and live mode changes pre
     httpHandler: () => ({ responseCode: 200, result: JSON.stringify({ version: 'test', mode: 'rule', now: '出口 B', uploadTotal: 0, downloadTotal: 0, connections: [] }) })
   } });
   try {
-    assert.equal(await r.store.setTunModeEnabledAsync(true), true);
     assert.equal(r.store.isRunning, false);
     assert.equal(r.store.vpnEnabled, false);
     await r.store.addNewProfile('主配置', '', 'file', fixture);
@@ -1430,7 +1425,6 @@ test('TUN: mode preference is separate from connection and live mode changes pre
     pair(r); r.store.chainConnected = true; r.store.connectedChainNames = ['入口, A', '出口 B'];
     assert.equal(await r.store.toggleRunningAsync(), true);
     assert.equal(r.vpnState.tunCreates.length, 1);
-    assert.equal(await r.store.setTunModeEnabledAsync(true), true);
     assert.equal(r.vpnState.tunCreates.length, 1);
     assert.equal(r.store.setTunSettings('gvisor', 1500), '');
     assert.equal(r.store.hasPendingTunChanges(), true);
@@ -1446,65 +1440,26 @@ test('TUN: mode preference is separate from connection and live mode changes pre
     assert.ok(r.disk.get('/sandbox/config.yaml').includes('dialer-proxy: "入口, A"'));
     assert.equal(await r.store.applyTunSettingsAsync(), true);
     assert.equal(r.vpnState.tunCreates.length, 2);
-    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
-    assert.equal(r.store.vpnEnabled, false);
-    assert.equal(r.store.isRunning, true);
-    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
-    assert.equal(r.store.chainConnected, true);
-    assert.equal(r.vpnState.tunDestroyed, 2);
-    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
-    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
-    assert.equal(r.vpnState.tunDestroyed, 2);
     await r.store.toggleRunningAsync();
-  } finally { r.dispose(); }
-});
-
-test('Local proxy: TUN off still connects without VPN authorization, persists the mode, and disconnects', async () => {
-  const r = await imported({ loaded: true });
-  try {
-    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
-    r.store.accessControlEnabled = true; r.store.accessControlMode = 'whitelist'; // Doesn't restrict proxy-only mode.
-    assert.equal(await r.store.toggleRunningAsync(), true);
-    assert.equal(r.store.isRunning, true);
-    assert.equal(r.store.vpnEnabled, false);
-    assert.equal(r.store.hasManagedRuntime(), true);
-    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
-    assert.equal(r.vpnState.startCalls.length, 0);
-    assert.equal(r.vpnState.observerCount, 0);
-    assert.equal(r.vpnState.tunCreates.length, 0);
-    assert.equal(r.controller.runtimeProxyPort, 7890);
-    assert.equal(r.controller.vpnTunnelActive, true); // Controller-based async probes in either mode.
-    assert.equal(JSON.parse(r.disk.get('/sandbox/lexiclash-state.json')).tunEnabled, false);
-    assert.equal(await r.store.toggleRunningAsync(), true);
-    assert.equal(r.store.isRunning, false);
-    assert.equal(r.store.hasManagedRuntime(), false);
-    assert.equal(r.vpnState.nativeStopCalls, 1);
-    r.store.tunEnabled = true; r.store.initialize('/sandbox');
-    assert.equal(r.store.tunEnabled, false);
-  } finally { r.dispose(); }
-});
-
-test('Local proxy: native listener failure reports disconnected and never opens a VPN', async () => {
-  const r = await imported({ loaded: true, vpnHooks: { launchProxyAsync: async () => 'mixed port occupied' } });
-  try {
-    await r.store.setTunModeEnabledAsync(false);
-    assert.equal(await r.store.toggleRunningAsync(), false);
     assert.equal(r.store.isRunning, false);
     assert.equal(r.store.vpnEnabled, false);
-    assert.equal(r.vpnState.startCalls.length, 0);
-    assert.match(r.store.lastOperationError, /mixed port occupied/);
+    assert.equal(r.vpnState.tunDestroyed, 2);
   } finally { r.dispose(); }
 });
 
 test('Startup: a clean runtime skips dead-controller probes and slow notification setup', async () => {
-  const r = await imported({ loaded: true });
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); }
+  } });
+  await r.store.addNewProfile('主配置', '', 'file', fixture);
   let finishNotification;
   try {
     await r.store.vpnManager.releaseVpn();
     assert.equal(r.httpState.requests.length, 0);
     assert.equal(r.vpnState.stopCalls.length, 0);
     r.BackgroundKeepAlive.start = () => new Promise(resolve => { finishNotification = resolve; });
-    await r.store.setTunModeEnabledAsync(false);
     assert.equal(await Promise.race([r.store.toggleRunningAsync(), new Promise(resolve => setTimeout(() => resolve('slow'), 200))]), true);
     assert.equal(r.store.coreStatus, 'connected');
     assert.equal(r.httpState.requests.some(req => req.url.endsWith('/configs') && req.options.method === 'PATCH'), false);
@@ -1513,8 +1468,8 @@ test('Startup: a clean runtime skips dead-controller probes and slow notificatio
   } finally { if (finishNotification) finishNotification(); r.dispose(); }
 });
 
-for (const tunEnabled of [true, false]) {
-  test(`Chain: replace live nodes, retain old chain on failed selection, and retry without disconnect (TUN=${tunEnabled})`, async () => {
+for (const staleDisabledSetting of [false, true]) {
+  test(`Chain: replace live nodes, retain old chain on failed selection, and retry without disconnect (legacy disabled setting=${staleDisabledSetting})`, async () => {
     let extension;
     let failSelection = false;
     let groupState = { Proxy: '入口, A', GLOBAL: '出口 B' };
@@ -1546,10 +1501,18 @@ for (const tunEnabled of [true, false]) {
     } });
     try {
       await r.store.addNewProfile('主配置', '', 'file', fixture);
-      await r.store.setTunModeEnabledAsync(tunEnabled);
+      if (staleDisabledSetting) {
+        r.store.persistState();
+        const saved = JSON.parse(r.disk.get('/sandbox/lexiclash-state.json'));
+        saved.tunEnabled = false; // Ignore the obsolete local-proxy preference during migration.
+        r.disk.set('/sandbox/lexiclash-state.json', JSON.stringify(saved));
+        r.store.initialize('/sandbox');
+      }
       pair(r);
       assert.equal(await r.store.connectProxyChainAsync(), '');
-      const starts = r.vpnState.startCalls.length + r.vpnState.proxyLaunchCalls.length;
+      assert.equal(r.store.vpnEnabled, true);
+      assert.equal(r.vpnState.tunCreates.length, 1);
+      const starts = r.vpnState.startCalls.length;
       // Change a running chain's exit and make the confirmation fail once.
       r.store.removeProxyChainNode('出口 B'); r.store.addProxyChainNode('C');
       const previousYaml = r.disk.get('/sandbox/config.yaml');
@@ -1564,7 +1527,7 @@ for (const tunEnabled of [true, false]) {
       assert.equal(await r.store.connectProxyChainAsync(), '');
       assert.deepEqual(Array.from(r.store.connectedChainNames), ['入口, A', 'C']);
       assert.equal(r.store.isProxyChainDraftApplied(), true);
-      assert.equal(r.vpnState.startCalls.length + r.vpnState.proxyLaunchCalls.length, starts);
+      assert.equal(r.vpnState.startCalls.length, starts);
       assert.equal(r.vpnState.tunDestroyed, 0);
       assert.equal(groupState.Proxy, 'C');
       await r.store.toggleRunningAsync();

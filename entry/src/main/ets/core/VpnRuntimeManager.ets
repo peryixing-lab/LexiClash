@@ -6,7 +6,6 @@ import { RuntimeDiagnostics } from './RuntimeDiagnostics';
 import { VpnAuthorization } from './VpnAuthorization';
 import { AppAccessControl, LexiAppAccessPolicy } from './AppAccessControl';
 import { LexiTunSettings, TunConfig } from './TunConfig';
-import { launchProxyAsync, stopAsync } from 'libclash_bridge.so';
 
 export interface LexiVpnCommand {
   sessionId: string;
@@ -15,7 +14,6 @@ export interface LexiVpnCommand {
   secret: string;
   accessControl?: LexiAppAccessPolicy;
   tun?: LexiTunSettings;
-  tunEnabled?: boolean;
 }
 
 export interface LexiVpnRuntimeStatus {
@@ -26,7 +24,6 @@ export interface LexiVpnRuntimeStatus {
   cleanupComplete: boolean;
   accessControl?: LexiAppAccessPolicy;
   tun?: LexiTunSettings;
-  tunEnabled?: boolean;
 }
 
 export interface LexiControllerTraffic {
@@ -46,8 +43,6 @@ export class VpnRuntimeManager {
   private lastPhysicalNetId: number = 0;
   private netLostObserved: boolean = false;
   private configQueue: Promise<void> = Promise.resolve<void>(undefined);
-  private localStatus: LexiVpnRuntimeStatus | null = null;
-  private localStartedAt: number = 0;
 
   setFilesDir(filesDir: string): void {
     this.filesDir = filesDir;
@@ -110,7 +105,6 @@ export class VpnRuntimeManager {
   }
 
   getRuntimeStatus(): LexiVpnRuntimeStatus {
-    if (this.localStatus !== null) { return this.localStatus; }
     if (this.filesDir.length === 0) {
       return { sessionId: '', status: 'stopped', error: '', updatedAt: 0, cleanupComplete: true };
     }
@@ -127,7 +121,6 @@ export class VpnRuntimeManager {
   }
 
   getSessionStartedAt(): number {
-    if (this.localStatus !== null) { return this.localStartedAt; }
     if (this.filesDir.length === 0) {
       return 0;
     }
@@ -225,8 +218,8 @@ export class VpnRuntimeManager {
 
   prepareStartFiles(yamlContent: string, selectionsMap: Record<string, string>,
     accessControl: LexiAppAccessPolicy = AppAccessControl.unrestricted(),
-    tun: LexiTunSettings = TunConfig.defaults(), tunEnabled: boolean = true): string {
-    const accessError: string = tunEnabled ? AppAccessControl.validationError(accessControl) : '';
+    tun: LexiTunSettings = TunConfig.defaults()): string {
+    const accessError: string = AppAccessControl.validationError(accessControl);
     if (accessError.length > 0) { throw new Error(accessError); }
     const tunError: string = TunConfig.validationError(tun);
     if (tunError.length > 0) { throw new Error(tunError); }
@@ -238,12 +231,11 @@ export class VpnRuntimeManager {
     const sessionId: string = this.generateRandomToken();
     const cmd: LexiVpnCommand = {
       sessionId: sessionId,
-      action: tunEnabled ? 'start' : 'proxy',
+      action: 'start',
       requestedAt: Date.now(),
       secret: this.secretValue,
       accessControl: accessControl,
-      tun: tun,
-      tunEnabled: tunEnabled
+      tun: tun
     };
     this.writePrivateFile('vpn-command.json', JSON.stringify(cmd));
     return sessionId;
@@ -256,7 +248,6 @@ export class VpnRuntimeManager {
     if (accessError.length > 0) { throw new Error(accessError); }
     const tunError: string = TunConfig.validationError(tun);
     if (tunError.length > 0) { throw new Error(tunError); }
-    await this.stopLocalProxy();
     await this.releaseVpn();
     const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap, accessControl, tun);
     let denied: boolean = false;
@@ -342,37 +333,9 @@ export class VpnRuntimeManager {
     });
   }
 
-  async startProxy(yamlContent: string, selectionsMap: Record<string, string>): Promise<void> {
-    await this.stopLocalProxy();
-    await this.releaseVpn();
-    const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap,
-      AppAccessControl.unrestricted(), TunConfig.defaults(), false);
-    try {
-      const error: string = await launchProxyAsync(this.filesDir, this.secretValue);
-      if (error.length > 0) { throw new Error(error); }
-      this.localStartedAt = Date.now();
-      this.localStatus = { sessionId: sessionId, status: 'running', error: '', updatedAt: Date.now(),
-        cleanupComplete: false, tunEnabled: false };
-      this.startKeepAlive().catch((error: Error): void => { RuntimeDiagnostics.record(String(error)); });
-    } catch (error) {
-      await stopAsync();
-      this.localStatus = null;
-      if (error instanceof Error) { throw error; }
-      throw new Error(String(error));
-    }
-  }
-
-  private async stopLocalProxy(): Promise<void> {
-    if (this.localStatus === null) { return; }
-    await stopAsync();
-    this.localStatus = null;
-    this.localStartedAt = 0;
-  }
-
   async stopVpn(): Promise<void> {
     try {
-      if (this.localStatus !== null) { await this.stopLocalProxy(); }
-      else { await this.releaseVpn(); }
+      await this.releaseVpn();
     } finally {
       await BackgroundKeepAlive.stop();
     }

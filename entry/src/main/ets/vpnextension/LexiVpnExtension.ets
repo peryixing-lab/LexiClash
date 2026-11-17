@@ -27,7 +27,6 @@ interface VpnRuntimeStatus {
   cleanupComplete: boolean;
   accessControl: LexiAppAccessPolicy;
   tun: LexiTunSettings;
-  tunEnabled: boolean;
 }
 
 interface VpnSession {
@@ -113,8 +112,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       updatedAt: Date.now(),
       cleanupComplete: this.cleaned,
       accessControl: this.accessControl,
-      tun: this.tunSettings,
-      tunEnabled: true
+      tun: this.tunSettings
     };
     try {
       this.writeJson('vpn-status.json', JSON.stringify(data));

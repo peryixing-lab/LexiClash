@@ -255,7 +255,7 @@ export struct ToolsMainView {
     const lang: string = this.selectedLocaleLang;
     if (key === 'language') return I18n.t('language', lang);
     if (key === 'theme') return I18n.t('theme', lang);
-    if (key === 'tun') return lang === 'en_US' ? 'TUN Mode' : 'TUN 模式';
+    if (key === 'tun') return lang === 'en_US' ? 'TUN Settings' : 'TUN 设置';
     if (key === 'access') return I18n.t('accessControl', lang);
     if (key === 'backup') return I18n.t('backupRestore', lang);
     if (key === 'advanced') return I18n.t('advancedConfig', lang);
@@ -384,7 +384,7 @@ export struct ToolsMainView {
                     Divider().color(this.palette.divider).strokeWidth(0.5).margin({ left: 68, right: 16 })
                     ToolsGroupedRowItem({
                       iconRes: $r('sys.symbol.shield_checkered'),
-                      titleText: this.selectedLocaleLang === 'en_US' ? 'TUN Mode' : 'TUN 模式',
+                      titleText: this.selectedLocaleLang === 'en_US' ? 'TUN Settings' : 'TUN 设置',
                       subtitleText: (this.revisionTick >= 0 && this.store.vpnEnabled)
                         ? (this.selectedLocaleLang === 'en_US' ? 'Active' : '已开启')
                         : (this.selectedLocaleLang === 'en_US' ? 'Off' : '未开启'),

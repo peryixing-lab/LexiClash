@@ -24,7 +24,7 @@ LexiClash 由我的另一个项目 **[OHClash](https://github.com/peryixing-lab/
 - 代理管理：节点分组、搜索、排序、延迟测试、分享链接与手动节点导入。
 - 链式代理：编辑节点顺序、预览配置并应用代理链。
 - 鸿蒙原生 VPN Extension、TUN 接入和后台任务管理。
-- TUN 与本地代理模式独立切换：关闭 TUN 后仍可连接本地 HTTP/SOCKS 代理；支持 System / gVisor / Mixed 协议栈、MTU 设置和应用后重连，见 [TUN 使用说明](docs/tun.md)。
+- 系统 VPN 连接始终启用 TUN，支持 System / gVisor / Mixed 协议栈、MTU 设置和应用后重连，见 [TUN 使用说明](docs/tun.md)。
 - 分应用代理：按包名维护白名单 / 黑名单，支持保存设置与应用后重连；使用方式和平台限制见 [分应用代理说明](docs/app-routing.md)。
 - WebRTC/STUN 防泄露、双栈 TUN 接管、代理 DNS 与 UDP 失败阻断；行为和真机验收步骤见 [网络隐私说明](docs/privacy.md)。
 - 请求、DNS 查询、外部资源和日志页面，以及主题与外观设置。
@@ -39,7 +39,7 @@ LexiClash 由我的另一个项目 **[OHClash](https://github.com/peryixing-lab/
 
 ## 分应用代理与包名获取
 
-在「工具 → 分应用代理」中填写应用包名并勾选，再选择白名单或黑名单。白名单表示只有勾选的应用进入 VPN；黑名单表示勾选的应用直连，其余应用进入 VPN。分应用设置仅在 TUN 模式下生效。
+在「工具 → 分应用代理」中填写应用包名并勾选，再选择白名单或黑名单。白名单表示只有勾选的应用进入 VPN；黑名单表示勾选的应用直连，其余应用进入 VPN。系统 VPN 连接会应用分应用设置。
 
 获取应用包名的方法：
 
@@ -53,7 +53,7 @@ LexiClash 由我的另一个项目 **[OHClash](https://github.com/peryixing-lab/
 ## 1.0.1 更新
 
 - 新增分应用代理，支持白名单、黑名单、按包名管理应用和本地保存。
-- 完善 TUN 模式与本地代理模式切换，关闭 TUN 后仍可通过本地 HTTP/SOCKS 端口连接。
+- 系统 VPN 连接始终使用 TUN，移除独立开关，保留协议栈与 MTU 设置。
 - 减少启动时的重复检查与等待，通知初始化不再阻塞连接成功状态。
 - 修复连接中更换链式代理节点的问题，更新失败时恢复原配置，支持直接重试。
 - 完善 IPv4/IPv6、代理 DNS、WebRTC/STUN 防泄露策略及相关说明。

@@ -42,7 +42,6 @@ import { LexiTunSettings, LexiTunStack, TunConfig } from '../core/TunConfig';
 
 interface LexiPersistedState {
   tunSettings?: LexiTunSettings;
-  tunEnabled?: boolean;
   accessControlEnabled?: boolean;
   accessControlMode?: LexiAppAccessMode;
   appAccessList?: AppAccessItem[];
@@ -115,7 +114,6 @@ export class AppStateStore {
   runTimeSeconds: number = 0;
   outboundMode: OutboundModeType = 'rule';
   vpnEnabled: boolean = false;
-  tunEnabled: boolean = true;
   systemProxyEnabled: boolean = false;
   allowLan: boolean = false;
   intranetIp: string = '—';
@@ -371,7 +369,6 @@ export class AppStateStore {
       this.appAccessList = AppAccessControl.restoreEntries(saved.appAccessList);
       const tunSettings: LexiTunSettings = saved.tunSettings ?? TunConfig.defaults();
       if (TunConfig.validationError(tunSettings).length > 0) { throw new Error('保存的 TUN 配置无效'); }
-      this.tunEnabled = saved.tunEnabled !== false;
       this.tunStack = tunSettings.stack;
       this.tunMtu = tunSettings.mtu;
       if (saved.networkSettings !== undefined) {
@@ -429,7 +426,7 @@ export class AppStateStore {
   persistState(): void {
     if (this.persistenceTimer !== -1) { clearTimeout(this.persistenceTimer); this.persistenceTimer = -1; }
     const state: LexiPersistedState = {
-      tunSettings: this.getTunSettings(), tunEnabled: this.tunEnabled,
+      tunSettings: this.getTunSettings(),
       accessControlEnabled: this.accessControlEnabled, accessControlMode: this.accessControlMode,
       appAccessList: this.appAccessList,
       networkSettings: this.networkPolicy(''),
@@ -672,7 +669,7 @@ export class AppStateStore {
     }
     this.isRunning = true;
     this.managedRuntime = true;
-    this.vpnEnabled = this.vpnManager.getRuntimeStatus().tunEnabled !== false;
+    this.vpnEnabled = true;
     this.coreStatus = 'connected';
     this.core.setVpnTunnelActive(true);
     this.core.setRuntimeProxyPort(this.mixedPort);
@@ -952,23 +949,6 @@ export class AppStateStore {
     return this.managedRuntime || this.vpnEnabled;
   }
 
-  async setTunModeEnabledAsync(nextEnabled: boolean): Promise<boolean> {
-    if (this.isVpnTransitioning || this.isChainConnecting) { return false; }
-    if (nextEnabled === this.tunEnabled) { return true; }
-    if (nextEnabled) {
-      const error: string = AppAccessControl.validationError(this.getAppAccessPolicy());
-      if (error.length > 0) { this.lastOperationError = error; this.notify(false); return false; }
-    }
-    const previous: boolean = this.tunEnabled;
-    this.tunEnabled = nextEnabled;
-    this.persistState();
-    this.notify();
-    if (!this.isRunning) { return true; }
-    const ok: boolean = await this.toggleRunningAsync(true);
-    if (!ok) { this.tunEnabled = previous; this.notify(); }
-    return ok;
-  }
-
   async applyTunSettingsAsync(): Promise<boolean> {
     const error: string = TunConfig.validationError(this.getTunSettings());
     if (error.length > 0) { this.lastOperationError = error; this.notify(false); return false; }
@@ -1043,7 +1023,7 @@ export class AppStateStore {
     }
     this.lastOperationError = '';
     if (!this.isRunning || reconnect) {
-      const accessError: string = this.tunEnabled ? AppAccessControl.validationError(this.getAppAccessPolicy()) : '';
+      const accessError: string = AppAccessControl.validationError(this.getAppAccessPolicy());
       if (accessError.length > 0) { this.lastOperationError = accessError; this.notify(false); return false; }
       const tunError: string = TunConfig.validationError(this.getTunSettings());
       if (tunError.length > 0) { this.lastOperationError = tunError; this.notify(false); return false; }
@@ -1083,13 +1063,9 @@ export class AppStateStore {
       this.coreStatus = 'connecting';
       this.notify(false);
       try {
-        if (this.tunEnabled) {
-          await this.vpnManager.startVpn(yamlToRun, selectedMap, this.getAppAccessPolicy(), this.getTunSettings());
-        } else {
-          await this.vpnManager.startProxy(yamlToRun, selectedMap);
-        }
+        await this.vpnManager.startVpn(yamlToRun, selectedMap, this.getAppAccessPolicy(), this.getTunSettings());
         this.isRunning = true;
-        this.vpnEnabled = this.tunEnabled;
+        this.vpnEnabled = true;
         this.managedRuntime = true;
         this.coreStatus = 'connected';
         this.core.setVpnTunnelActive(true);
@@ -1099,7 +1075,7 @@ export class AppStateStore {
         this.lastTrafficSampleAt = 0;
         this.lastUploadTotalSample = 0;
         this.lastDownloadTotalSample = 0;
-        this.appendLog('info', 'Core', 'Runtime', this.tunEnabled ? 'VPN TUN & mihomo connected' : 'Local HTTP/SOCKS proxy connected');
+        this.appendLog('info', 'Core', 'Runtime', 'VPN TUN & mihomo connected');
         this.notify();
         this.refreshOutboundIp();
         this.recheckAllServices();
