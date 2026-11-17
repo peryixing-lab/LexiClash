@@ -56,7 +56,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
   private tunSettings: LexiTunSettings = TunConfig.defaults();
 
   onCreate(): void {
-    RuntimeDiagnostics.watch();
+    RuntimeDiagnostics.watch(this.context.filesDir, 'vpn');
     RuntimeDiagnostics.record('LexiVpnExtension created');
     hilog.info(DOMAIN, 'LexiClashVPN', 'VPN extension created');
     const command: VpnCommand | undefined = this.readCommand();

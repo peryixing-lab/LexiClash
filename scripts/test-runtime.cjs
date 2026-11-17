@@ -18,12 +18,14 @@ function runtime({
   const cache = new Map();
   const calls = [];
   const disk = new Map();
+  const openModes = new Map();
   const vpnState = {
     observerCount: 0, observerCallback: null, unsubscribed: 0,
     startCalls: [], stopCalls: [], tunCreates: [], tunDestroyed: 0, closedFds: [],
     nativeLaunchCalls: [], proxyLaunchCalls: [], nativeStartTunCalls: [], nativeStopCalls: 0,
     physicalNetId: 100, netConnections: [], keepAliveStarts: [], keepAliveStops: 0,
-    keepAliveCancelCb: null, notifications: [], keepAliveStoppedIds: []
+    keepAliveCancelCb: null, notifications: [], keepAliveStoppedIds: [], systemVpnActive: false,
+    systemVpnAddress: '172.19.0.1'
   };
   const native = {
     nativeInitCore: () => JSON.stringify({ id: 0, result: loaded ? { initialized: true } : null, error: loaded ? null : 'CORE_UNAVAILABLE' }),
@@ -51,9 +53,15 @@ function runtime({
     }
   };
   const fakeFs = {
-    OpenMode: { CREATE: 1, READ_WRITE: 2, TRUNC: 4, WRITE_ONLY: 8 },
+    OpenMode: { CREATE: 1, READ_WRITE: 2, TRUNC: 4, WRITE_ONLY: 8, APPEND: 16 },
     accessSync: file => disk.has(file), readTextSync: file => disk.get(file), mkdirSync() {}, unlinkSync: file => disk.delete(file),
-    openSync: file => ({ fd: file }), writeSync: (file, text) => disk.set(file, text),
+    openSync: (file, mode) => {
+      openModes.set(file, mode);
+      if (mode & 4) disk.set(file, '');
+      return { fd: file };
+    },
+    writeSync: (file, text) => disk.set(file, (openModes.get(file) & 16) ? (disk.get(file) || '') + text : text),
+    statSync: file => ({ size: Buffer.byteLength(disk.get(file) || '') }),
     closeSync: fd => { if (typeof fd === 'number') vpnState.closedFds.push(fd); },
     renameSync: (from, to) => { disk.set(to, disk.get(from)); disk.delete(from); },
   };
@@ -92,17 +100,22 @@ function runtime({
       createVpnConnection: () => ({
         create: async cfg => {
           vpnState.tunCreates.push(cfg);
+          vpnState.systemVpnActive = true;
           return vpnHooks.createTunFd ? vpnHooks.createTunFd(cfg) : 77;
         },
-        destroy: async () => { vpnState.tunDestroyed++; }
+        destroy: async () => { vpnState.tunDestroyed++; vpnState.systemVpnActive = false; }
       })
     },
     VpnExtensionAbility: class VpnExtensionAbility { constructor() { this.context = { filesDir: '/sandbox' }; } },
     connection: {
       NetCap: { NET_CAPABILITY_INTERNET: 12, NET_CAPABILITY_NOT_VPN: 15 },
+      NetBearType: { BEARER_WIFI: 1, BEARER_VPN: 4 },
       getDefaultNet: async () => ({ netId: vpnState.physicalNetId }),
       getDefaultNetSync: () => ({ netId: vpnState.physicalNetId }),
-      getConnectionProperties: async () => ({ linkAddresses: [] }),
+      getAllNets: async () => [{ netId: vpnState.physicalNetId }, ...(vpnState.systemVpnActive ? [{ netId: 900 }] : [])],
+      getNetCapabilities: async net => ({ bearerTypes: [net.netId === 900 ? 4 : 1] }),
+      getConnectionProperties: async net => ({ linkAddresses: net.netId === 900
+        ? [{ address: { address: vpnState.systemVpnAddress, family: 1 }, prefixLength: 30 }] : [] }),
       createNetConnection: () => {
         const handlers = {};
         const conn = {
@@ -165,7 +178,8 @@ function runtime({
       if (specifier === '@kit.BasicServicesKit') return {};
       if (specifier === '@kit.PerformanceAnalysisKit') return {
         hilog: { info() {}, warn() {}, error() {}, debug() {} },
-        hiAppEvent: { addWatcher() {}, EventType: { FAULT: 1 } }
+        hiAppEvent: { addWatcher() {}, EventType: { FAULT: 1 }, domain: { OS: 'OS' },
+          event: { APP_CRASH: 'APP_CRASH', APP_FREEZE: 'APP_FREEZE', APP_KILLED: 'APP_KILLED', RESOURCE_OVERLIMIT: 'RESOURCE_OVERLIMIT' } }
       };
       if (specifier === 'libclash_bridge.so') return native;
       if (specifier.startsWith('.')) return load(path.resolve(path.dirname(file), specifier + '.ets'));
@@ -201,6 +215,7 @@ function runtime({
   const { ThemeManager } = load(path.join(root, 'entry/src/main/ets/common/ThemeManager.ets'));
   const { ResponsiveLayout } = load(path.join(root, 'entry/src/main/ets/common/ResponsiveLayout.ets'));
   const { BackgroundKeepAlive } = load(path.join(root, 'entry/src/main/ets/core/BackgroundKeepAlive.ets'));
+  const { RuntimeDiagnostics } = load(path.join(root, 'entry/src/main/ets/core/RuntimeDiagnostics.ets'));
   BackgroundKeepAlive.setAbilityContext({ bundleName: 'com.lovexjy.lexiclash' });
   const { VpnAuthorization } = load(path.join(root, 'entry/src/main/ets/core/VpnAuthorization.ets'));
   const { AppAccessControl } = load(path.join(root, 'entry/src/main/ets/core/AppAccessControl.ets'));
@@ -208,7 +223,7 @@ function runtime({
   const LexiVpnExtension = load(path.join(root, 'entry/src/main/ets/vpnextension/LexiVpnExtension.ets')).default;
   const store = AppStateStore.getInstance();
   store.initialize('/sandbox');
-  return { chain: ProxyChainConfig, uriParser: ClashUriParser, parser: YamlProfileParser, ThemeManager, ResponsiveLayout, BackgroundKeepAlive, store, AppStateStore, controller: CoreController.getInstance(), VpnAuthorization, AppAccessControl, TunConfig, LexiVpnExtension, vpnState, calls, disk, httpState, dispose };
+  return { chain: ProxyChainConfig, uriParser: ClashUriParser, parser: YamlProfileParser, ThemeManager, ResponsiveLayout, BackgroundKeepAlive, RuntimeDiagnostics, store, AppStateStore, controller: CoreController.getInstance(), VpnAuthorization, AppAccessControl, TunConfig, LexiVpnExtension, vpnState, calls, disk, httpState, dispose };
 }
 
 const fixture = `mixed-port: 7890
@@ -1082,7 +1097,7 @@ test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous t
   }
 });
 
-test('KeepAlive: reports the real byte counter through the required data-transfer template, including idle updates', async () => {
+test('KeepAlive: an open-ended transfer stays unfinished while displaying real traffic, including idle updates', async () => {
   const r = runtime({ realTimers: true });
   try {
     await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 3145728);
@@ -1093,7 +1108,7 @@ test('KeepAlive: reports the real byte counter through the required data-transfe
     for (const notification of r.vpnState.notifications) {
       assert.equal(notification.id, 71);
       assert.equal(notification.template.name, 'downloadTemplate');
-      assert.equal(notification.template.data.progressValue, 3145728);
+      assert.equal(notification.template.data.progressValue, 0);
       assert.equal(notification.template.data.fileName, '已传输 3.00 MiB');
     }
     await r.BackgroundKeepAlive.stop();
@@ -1161,6 +1176,7 @@ test('KeepAlive: dismissing the notification does not silently rearm on resume o
   const r = runtime({ realTimers: true });
   try {
     r.httpState.response.result = JSON.stringify({ version: 'mihomo-test' });
+    r.vpnState.systemVpnActive = true;
     r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ status: 'running', cleanupComplete: false }));
     await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 1024);
     r.vpnState.keepAliveCancelCb({ id: 91, reason: 1, detailedReason: 3 });
@@ -1196,7 +1212,7 @@ test('KeepAlive: a transient refresh failure is visible and the next real update
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(r.BackgroundKeepAlive.getLastError(), '');
     assert.equal(r.vpnState.keepAliveStarts.length, 1);
-    assert.equal(r.vpnState.notifications.at(-1).template.data.progressValue, 4096);
+    assert.equal(r.vpnState.notifications.at(-1).template.data.progressValue, 0);
     await r.BackgroundKeepAlive.stop();
   } finally { r.dispose(); }
 });
@@ -1217,6 +1233,95 @@ test('VPN startup: rejected background protection fails connection and releases 
     assert.equal(r.vpnState.tunDestroyed, 1);
     assert.equal(r.vpnState.nativeStopCalls, 1);
     assert.equal(r.BackgroundKeepAlive.isActive(), false);
+  } finally { r.dispose(); }
+});
+
+test('VPN health: a reachable controller and cached running state cannot substitute for the system tunnel', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    r.httpState.response.result = JSON.stringify({ version: 'test' });
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ sessionId: 'lost', status: 'running', updatedAt: Date.now(), cleanupComplete: false }));
+    assert.equal(await r.store.vpnManager.isSessionHealthy(), false);
+    assert.equal(r.vpnState.keepAliveStarts.length, 0);
+    r.vpnState.systemVpnActive = true;
+    r.vpnState.systemVpnAddress = '192.0.2.1';
+    assert.equal(await r.store.vpnManager.isSessionHealthy(), false, 'an unrelated VPN is not our tunnel');
+    r.vpnState.systemVpnAddress = '172.19.0.1';
+    assert.equal(await r.store.vpnManager.isSessionHealthy(), true);
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('VPN health: polling clears a phantom connection and tells the extension to release its resources', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    r.store.isRunning = true;
+    r.store.vpnEnabled = true;
+    r.store.managedRuntime = true;
+    r.store.coreStatus = 'connected';
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ sessionId: 'lost', status: 'running', updatedAt: Date.now(), cleanupComplete: false }));
+    await r.store.pollLiveVpnStatsAsync();
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.vpnEnabled, false);
+    assert.equal(r.store.coreStatus, 'disconnected');
+    assert.match(r.store.lastOperationError, /系统 VPN 连接已断开/);
+    assert.equal(JSON.parse(r.disk.get('/sandbox/vpn-command.json')).action, 'stop');
+  } finally { r.dispose(); }
+});
+
+test('VPN health: returning to the foreground clears stale UI when the system VPN has vanished', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    r.store.isRunning = true;
+    r.store.vpnEnabled = true;
+    r.store.managedRuntime = true;
+    r.store.coreStatus = 'connected';
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ sessionId: 'lost', status: 'running', updatedAt: Date.now(), cleanupComplete: false }));
+    await r.store.restoreExistingVpnSessionAsync();
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.coreStatus, 'disconnected');
+  } finally { r.dispose(); }
+});
+
+test('VPN health: a transient controller error preserves a fresh live tunnel, but a dead extension cannot stay connected', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    r.store.isRunning = true;
+    r.store.vpnEnabled = true;
+    r.store.managedRuntime = true;
+    r.vpnState.systemVpnActive = true;
+    r.httpState.throws = true;
+    const status = { sessionId: 'stalled', status: 'running', updatedAt: Date.now(), cleanupComplete: false };
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify(status));
+    await r.store.pollLiveVpnStatsAsync();
+    await r.store.pollLiveVpnStatsAsync();
+    await r.store.pollLiveVpnStatsAsync();
+    assert.equal(r.store.isRunning, true);
+    status.updatedAt = Date.now() - 60000;
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify(status));
+    await r.store.pollLiveVpnStatsAsync();
+    assert.equal(r.store.isRunning, false);
+    assert.match(r.store.lastOperationError, /停止响应/);
+  } finally { r.dispose(); }
+});
+
+test('Diagnostics: the bounded journal survives events, masks credentials, and separates UI and VPN logs', () => {
+  const r = runtime();
+  try {
+    r.RuntimeDiagnostics.watch('/sandbox', 'ui');
+    r.RuntimeDiagnostics.record('UI background');
+    r.RuntimeDiagnostics.record('secret=private-token https://private.example/config');
+    const journal = r.disk.get('/sandbox/runtime-ui.log');
+    assert.match(journal, /UI background/);
+    assert.match(journal, /\[redacted\]/);
+    assert.ok(!journal.includes('private-token') && !journal.includes('private.example'));
+    r.disk.set('/sandbox/runtime-ui.log', 'x'.repeat(65536));
+    r.RuntimeDiagnostics.record('latest cancellation');
+    assert.ok(r.disk.get('/sandbox/runtime-ui.log').length < 4000);
+    r.RuntimeDiagnostics.watch('/sandbox', 'vpn');
+    r.RuntimeDiagnostics.record('VPN extension destroyed');
+    assert.match(r.disk.get('/sandbox/runtime-ui.log'), /latest cancellation/);
+    assert.match(r.disk.get('/sandbox/runtime-vpn.log'), /extension destroyed/);
   } finally { r.dispose(); }
 });
 
@@ -1363,6 +1468,7 @@ test('Privacy: ordinary connections cannot fabricate DNS queries or upstream evi
   }) }) } });
   try {
     r.store.isRunning = true; r.store.vpnEnabled = true;
+    r.vpnState.systemVpnActive = true;
     r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ status: 'running', cleanupComplete: false }));
     await r.store.pollLiveVpnStatsAsync();
     assert.equal(r.store.liveConnections.length, 1);

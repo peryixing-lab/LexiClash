@@ -351,10 +351,14 @@ export class VpnRuntimeManager {
     if (status.status !== 'running' || status.cleanupComplete) {
       return false;
     }
+    if (!await this.systemVpnIsActive()) {
+      RuntimeDiagnostics.record(`System VPN missing for session=${status.sessionId} heartbeatAge=${Date.now() - status.updatedAt}`);
+      return false;
+    }
     try {
       await this.checkController();
     } catch (_err) {
-      return false;
+      return this.runtimeIsFresh(status);
     }
     try {
       await this.startKeepAlive();
@@ -363,6 +367,21 @@ export class VpnRuntimeManager {
       RuntimeDiagnostics.record(`VPN background task unavailable on resume: ${String(error)}`);
     }
     return true;
+  }
+
+  async systemVpnIsActive(): Promise<boolean> {
+    const networks: connection.NetHandle[] = await connection.getAllNets();
+    for (let i: number = 0; i < networks.length; i++) {
+      const capabilities: connection.NetCapabilities = await connection.getNetCapabilities(networks[i]);
+      if (capabilities.bearerTypes.indexOf(connection.NetBearType.BEARER_VPN) < 0) { continue; }
+      const properties: connection.ConnectionProperties = await connection.getConnectionProperties(networks[i]);
+      // Match our TUN address, rather than accepting another application's VPN.
+      if (properties.linkAddresses.some((link: connection.LinkAddress): boolean =>
+        link.address.address === '172.19.0.1' || link.address.address === 'fdfe:dcba:9876::1')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   startNetworkWatch(onNetworkRecover: (netIdChanged: boolean, netId: number) => void): void {

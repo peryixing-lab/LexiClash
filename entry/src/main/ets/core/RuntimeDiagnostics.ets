@@ -14,21 +14,51 @@ interface LexiFaultParams {
 // observer alive for the process lifetime, including while the UI is hidden.
 export class RuntimeDiagnostics {
   private static watching: boolean = false;
+  private static filesDir: string = '';
+  private static journalPath: string = '';
 
   static record(message: string): void {
     const safe: string = message.replace(/https?:\/\/[^\s"']+/g, '[URL]')
       .replace(/(secret|password|token|uuid)\s*[:=]\s*[^\s,}]+/gi, '$1=[redacted]');
-    hilog.info(0xF1C1, 'LexiClashDiag', '%{public}s', safe.substring(0, 3500));
+    const entry: string = safe.substring(0, 3500);
+    hilog.info(0xF1C1, 'LexiClashDiag', '%{public}s', entry);
+    if (RuntimeDiagnostics.journalPath.length === 0) { return; }
+    try {
+      let truncate: boolean = false;
+      try { truncate = fs.statSync(RuntimeDiagnostics.journalPath).size >= 65536; } catch (_statErr) {}
+      const file: fs.File = fs.openSync(RuntimeDiagnostics.journalPath,
+        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | (truncate ? fs.OpenMode.TRUNC : fs.OpenMode.APPEND));
+      try { fs.writeSync(file.fd, `${new Date().toISOString()} ${entry}\n`); } finally { fs.closeSync(file); }
+    } catch (_writeErr) {
+      // Diagnostics must never interrupt the VPN's lifecycle.
+    }
   }
 
-  static watch(): void {
+  static replayRecent(): void {
+    if (RuntimeDiagnostics.filesDir.length === 0) { return; }
+    ['ui', 'vpn'].forEach((kind: string): void => {
+      try {
+        const lines: string[] = fs.readTextSync(`${RuntimeDiagnostics.filesDir}/runtime-${kind}.log`).split('\n');
+        lines.slice(-16).forEach((line: string): void => {
+          if (line.length > 0) { hilog.warn(0xF1C1, 'LexiClashDiag', 'Saved %{public}s: %{public}s', kind, line); }
+        });
+      } catch (_readErr) {}
+    });
+  }
+
+  static watch(filesDir: string = '', kind: string = 'ui'): void {
+    if (filesDir.length > 0) {
+      RuntimeDiagnostics.filesDir = filesDir;
+      RuntimeDiagnostics.journalPath = `${filesDir}/runtime-${kind === 'vpn' ? 'vpn' : 'ui'}.log`;
+    }
     if (RuntimeDiagnostics.watching) { return; }
     try {
       hiAppEvent.addWatcher({
         name: 'LexiClashFaults',
         appEventFilters: [{
           domain: hiAppEvent.domain.OS,
-          names: [hiAppEvent.event.APP_CRASH, hiAppEvent.event.APP_FREEZE, hiAppEvent.event.APP_KILLED]
+          names: [hiAppEvent.event.APP_CRASH, hiAppEvent.event.APP_FREEZE, hiAppEvent.event.APP_KILLED,
+            hiAppEvent.event.RESOURCE_OVERLIMIT]
         }],
         onReceive: (_domain: string, groups: hiAppEvent.AppEventGroup[]): void => {
           groups.forEach((group: hiAppEvent.AppEventGroup): void => {
@@ -37,6 +67,7 @@ export class RuntimeDiagnostics {
               RuntimeDiagnostics.record(
                 `${event.name} time=${params.time} pid=${params.pid} process=${params.process_name} foreground=${params.foreground} reason=${params.reason}`
               );
+              RuntimeDiagnostics.record(`System fault parameters: ${JSON.stringify(event.params)}`);
               (params.external_log ?? []).slice(0, 2).forEach((path: string): void => {
                 if (!path.startsWith('/data/storage/el2/log/hiappevent/')) { return; }
                 fs.readText(path, { length: 24000 }).then((report: string): void => {

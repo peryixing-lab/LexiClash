@@ -38,6 +38,7 @@ import { LexiControllerTraffic, LexiVpnRuntimeStatus, VpnRuntimeManager } from '
 import { StateRepository } from './StateRepository';
 import { LexiRuntimePolicy, RuntimeConfig } from '../core/RuntimeConfig';
 import { AppAccessControl, LexiAppAccessMode, LexiAppAccessPolicy } from '../core/AppAccessControl';
+import { RuntimeDiagnostics } from '../core/RuntimeDiagnostics';
 import { LexiTunSettings, LexiTunStack, TunConfig } from '../core/TunConfig';
 
 interface LexiPersistedState {
@@ -274,6 +275,8 @@ export class AppStateStore {
 
   private tickerId: number = -1;
   private isAppInForeground: boolean = true;
+  private lastSystemVpnCheckAt: number = 0;
+  private liveStatsFailureCount: number = 0;
 
   private constructor() {
     this.startLiveTicker();
@@ -663,8 +666,17 @@ export class AppStateStore {
     if (this.vpnManager.getFilesDir().length === 0) {
       return;
     }
-    const healthy: boolean = await this.vpnManager.isSessionHealthy();
+    let healthy: boolean;
+    try {
+      healthy = await this.vpnManager.isSessionHealthy();
+    } catch (error) {
+      RuntimeDiagnostics.record(`Cannot verify VPN on resume: ${String(error)}`);
+      return;
+    }
     if (!healthy) {
+      if (this.isRunning && this.hasManagedRuntime() && !this.isVpnTransitioning) {
+        this.markVpnDisconnected('系统 VPN 连接已断开，请重新连接');
+      }
       return;
     }
     this.isRunning = true;
@@ -811,6 +823,27 @@ export class AppStateStore {
     }
   }
 
+  private markVpnDisconnected(message: string): void {
+    this.isRunning = false;
+    this.vpnEnabled = false;
+    this.managedRuntime = false;
+    this.coreStatus = 'disconnected';
+    this.core.setVpnTunnelActive(false);
+    this.core.setRuntimeProxyPort(0);
+    this.currentUploadSpeed = 0;
+    this.currentDownloadSpeed = 0;
+    this.liveConnections = [];
+    this.lastTrafficSampleAt = 0;
+    this.liveStatsFailureCount = 0;
+    this.lastSystemVpnCheckAt = 0;
+    this.lastOperationError = message;
+    this.vpnManager.requestVpnStop();
+    this.vpnManager.stopKeepAlive();
+    RuntimeDiagnostics.record(message);
+    this.appendLog('warning', 'VPN', 'Disconnect', message);
+    this.notify(false);
+  }
+
   private async pollLiveVpnStatsAsync(): Promise<void> {
     if (this.isPollingLiveStats || !this.isRunning || !this.hasManagedRuntime() ||
       this.isVpnTransitioning) {
@@ -836,7 +869,18 @@ export class AppStateStore {
         this.notify(false);
         return;
       }
+      if (Date.now() - this.lastSystemVpnCheckAt >= 5000) {
+        const active: boolean = await this.vpnManager.systemVpnIsActive();
+        if (this.isVpnTransitioning || !this.isRunning ||
+          this.vpnManager.getRuntimeStatus().sessionId !== status.sessionId) { return; }
+        this.lastSystemVpnCheckAt = Date.now();
+        if (!active) {
+          this.markVpnDisconnected('系统 VPN 连接已断开，请重新连接');
+          return;
+        }
+      }
       const snap: LexiControllerTraffic = await this.vpnManager.getConnectionsSnapshot();
+      this.liveStatsFailureCount = 0;
       const now: number = Date.now();
       const validWindow: boolean = this.lastTrafficSampleAt > 0 &&
         now > this.lastTrafficSampleAt &&
@@ -917,8 +961,16 @@ export class AppStateStore {
       this.recentRequestsCount = this.recentRequests.length;
       this.dnsQueriesCount = this.dnsQueries.length;
       this.notify(false);
-    } catch (_err) {
-      // Transient controller query failures must not tear down VPN UI state immediately.
+    } catch (error) {
+      this.liveStatsFailureCount++;
+      const status: LexiVpnRuntimeStatus = this.vpnManager.getRuntimeStatus();
+      // Keep a single transient query failure from clearing a live tunnel, but
+      // do not display a dead extension's cached 'running' state indefinitely.
+      if (this.liveStatsFailureCount >= 3 && !this.vpnManager.runtimeIsFresh(status) && !this.isVpnTransitioning) {
+        this.markVpnDisconnected('VPN 服务已停止响应，请重新连接');
+      } else if (this.liveStatsFailureCount === 1) {
+        RuntimeDiagnostics.record(`VPN health query failed: ${String(error)}`);
+      }
     } finally {
       this.isPollingLiveStats = false;
     }

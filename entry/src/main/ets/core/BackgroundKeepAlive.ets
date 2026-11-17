@@ -79,12 +79,11 @@ export class BackgroundKeepAlive {
           progress: { currentValue: Math.floor(bytes / 1024), isPercentage: false }
         }
       },
-      // DATA_TRANSFER uses downloadTemplate to report progress. A VPN has no
-      // percentage completion: publish real cumulative bytes. Values >= 100
-      // hide the template's percentage ring; never invent transfer progress.
+      // progressValue is completion percentage, not a byte counter. A VPN is
+      // an open-ended transfer; keep it unfinished and show actual bytes above.
       template: {
         name: 'downloadTemplate',
-        data: { title: 'LexiClash VPN', fileName: transferred, progressValue: Math.floor(bytes) }
+        data: { title: 'LexiClash VPN', fileName: transferred, progressValue: 0 }
       }
     });
     if (generation !== BackgroundKeepAlive.generation) { return; }

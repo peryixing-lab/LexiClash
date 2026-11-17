@@ -10,8 +10,8 @@ const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
-    RuntimeDiagnostics.watch();
-    RuntimeDiagnostics.record(`UI created: lastExitReason=${launchParam.lastExitReason}`);
+    RuntimeDiagnostics.watch(this.context.filesDir, 'ui');
+    RuntimeDiagnostics.record(`UI created: lastExitReason=${launchParam.lastExitReason} lastExitMessage=${launchParam.lastExitMessage} detail=${JSON.stringify(launchParam.lastExitDetailInfo)}`);
     BackgroundKeepAlive.setAbilityContext(this.context);
     AppStateStore.getInstance().initialize(this.context.filesDir);
     AppStorage.setOrCreate<boolean>('lexiSystemDark',
@@ -57,6 +57,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    RuntimeDiagnostics.replayRecent();
     RuntimeDiagnostics.record(`UI foreground: keepAlive=${BackgroundKeepAlive.getLastStatus()}`);
     AppStateStore.getInstance().setAppInForeground(true);
     // Ability has brought to foreground
