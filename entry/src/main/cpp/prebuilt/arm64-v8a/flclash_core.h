@@ -83,6 +83,7 @@ extern char* FlClashLaunch(char* homeDir, char* secret);
 extern unsigned long long FlClashLifecycleEpoch();
 extern unsigned long long FlClashCancelLifecycle();
 extern char* FlClashLaunchAtEpoch(char* homeDir, char* secret, unsigned long long epoch);
+extern char* FlClashLaunchProxyAtEpoch(char* homeDir, char* secret, unsigned long long epoch);
 extern int FlClashStartTun(int fd);
 extern int FlClashStartTunAtEpoch(int fd, unsigned long long epoch);
 extern char* FlClashGetTunError();

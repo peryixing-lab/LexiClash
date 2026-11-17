@@ -98,6 +98,16 @@ export class CoreController {
   private isExternalGoLoaded: boolean = false;
   private lastInitRawResponse: string = '';
   private vpnTunnelActive: boolean = false;
+  private runtimeProxyPort: number = 0;
+
+  setRuntimeProxyPort(port: number): void {
+    this.runtimeProxyPort = port;
+  }
+
+  private runtimeProxy(): boolean | http.HttpProxy {
+    return this.runtimeProxyPort > 0
+      ? { host: '127.0.0.1', port: this.runtimeProxyPort, exclusionList: [] } : false;
+  }
 
   setVpnTunnelActive(active: boolean): void {
     this.vpnTunnelActive = active;
@@ -105,6 +115,16 @@ export class CoreController {
 
   hasOfflineNativeProbes(): boolean {
     return this.isReady() && typeof testProfileDelay === 'function' && typeof beginDelayJob === 'function';
+  }
+
+  supportsVpnPrivacy(): boolean {
+    const raw: string = this.invokeMethod('privacy.capabilities', '{}');
+    if (this.responseError(raw).length > 0) { return false; }
+    try {
+      const reply: LexiCoreReply = JSON.parse(raw) as LexiCoreReply;
+      const capabilities: Record<string, Object> = reply.result as Record<string, Object>;
+      return Number(capabilities['version'] ?? 0) >= 1;
+    } catch (_error) { return false; }
   }
 
   async inspectProfileNative(content: string): Promise<string> {
@@ -507,6 +527,7 @@ export class CoreController {
       const client: http.HttpRequest = http.createHttp();
       try {
         const response: http.HttpResponse = await client.request(endpoint, {
+          usingProxy: this.runtimeProxy(),
           method: http.RequestMethod.GET,
           expectDataType: http.HttpDataType.STRING,
           usingCache: false,
@@ -602,6 +623,7 @@ export class CoreController {
     const startMs: number = Date.now();
     try {
       const resp: http.HttpResponse = await client.request(url, {
+        usingProxy: this.runtimeProxy(),
         method: http.RequestMethod.GET,
         usingCache: false,
         reuseConnections: false,

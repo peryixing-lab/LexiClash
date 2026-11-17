@@ -7,6 +7,7 @@ export const launch: (homeDir: string, secret: string) => string;
 export const startTun: (fd: number) => boolean;
 export const getTunError: () => string;
 export const launchAsync: (homeDir: string, secret: string) => Promise<string>;
+export const launchProxyAsync: (homeDir: string, secret: string) => Promise<string>;
 export const startTunAsync: (fd: number) => Promise<boolean>;
 export const stop: () => void;
 export const stopAsync: () => Promise<void>;

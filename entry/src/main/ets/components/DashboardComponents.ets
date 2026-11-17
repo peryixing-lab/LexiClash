@@ -189,7 +189,7 @@ export struct CurrentOutboundCardView {
 
   private getStatusBadgeText(): string {
     if (this.isTransitioningReactive()) {
-      if (this.isRunningReactive()) {
+      if (this.store.coreStatus !== 'connecting') {
         return this.store.localeLang === 'en_US' ? 'Stopping…' : '断开中…';
       }
       return this.store.localeLang === 'en_US' ? 'Connecting…' : '连接中…';
@@ -326,7 +326,8 @@ export struct CurrentOutboundCardView {
             SymbolGlyph($r('sys.symbol.shield_checkered'))
               .fontSize(16)
               .fontColor([this.palette.onSurfaceVariant])
-            Text(I18n.t('status', this.store.localeLang))
+            Text(this.store.localeLang === 'en_US' ? (this.store.tunEnabled ? 'TUN Proxy' : 'Local Proxy')
+              : (this.store.tunEnabled ? 'TUN 代理' : '本地代理'))
               .fontSize(15)
               .fontWeight(FontWeight.Bold)
               .fontColor(this.palette.onSurface)
@@ -500,6 +501,9 @@ export struct CurrentOutboundCardView {
             .fontColor([this.hasProfilesReactive() ? this.palette.onPrimary : this.palette.onSurfaceVariant])
         }
         .id('dashboard-connect-button')
+        .accessibilityText(this.store.localeLang === 'en_US'
+          ? (this.store.isRunning ? 'Disconnect proxy' : 'Connect proxy')
+          : (this.store.isRunning ? '断开代理连接' : '连接代理'))
         .width(88)
         .height(88)
         .opacity(this.isTransitioningReactive() ? 0.72 : 1)

@@ -90,6 +90,10 @@ export struct ProxyChainPanel {
     return this.revisionTick >= 0 ? this.store.getProxyChainValidationError() : '';
   }
 
+  private udpWarning(): string {
+    return this.revisionTick >= 0 ? this.store.getProxyChainUdpWarning() : '';
+  }
+
   private coreMissing(): boolean {
     return this.revisionTick >= 0 && this.store.getRuntimeUnavailableReason().length > 0;
   }
@@ -560,6 +564,13 @@ export struct ProxyChainPanel {
           ? this.palette.warnContainer
           : ((this.isConnected() && !this.isConnecting()) ? this.palette.okContainer : this.palette.block))
         .borderRadius(12)
+
+        if (this.udpWarning().length > 0) {
+          Text(this.udpWarning())
+            .fontSize(12)
+            .fontColor(this.palette.onSurfaceVariant)
+            .width('100%')
+        }
 
         if (this.coreMissing()) {
           Text('尚未安装代理内核，可先编辑、保存和复制链式配置。')

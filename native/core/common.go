@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -419,27 +418,16 @@ func loadConfig(path string) (*config.Config, error) {
 // subscription URI decoder in Clash Verge Rev. Keep unencoded content intact.
 
 func applyConfig(params *SetupParams) error {
-	runtime.GC()
 	configMu.Lock()
 	defer configMu.Unlock()
 
 	setTestURL(params.TestURL)
 	cfg, err := loadConfig(filepath.Join(constant.Path.HomeDir(), "config.yaml"))
 	if err != nil {
-		// The fallback is what keeps the listeners serving while the host
-		// reports the error, but it applies a config with no proxies in it.
-		// From the UI that is indistinguishable from a subscription that went
-		// dead: the profile still lists every node, every delay test answers
-		// Timeout, and nothing routes. Name the real cause in the log.
-		logError(
-			"config apply failed, falling back to the built-in default - no proxies will be available: %v",
-			err,
-		)
-		fallback, fallbackErr := config.ParseRawConfig(config.DefaultRawConfig())
-		if fallbackErr != nil {
-			return err
-		}
-		cfg = fallback
+		// A default profile permits direct traffic and discards the last valid
+		// privacy policy. Reject invalid updates without changing the live core.
+		logError("config apply rejected; keeping the previous configuration: %v", err)
+		return err
 	}
 	if openHarmonyTarget {
 		// The VPN advertises a DNS address inside its TUN subnet. Keep mihomo's

@@ -156,6 +156,9 @@ func withoutArguments(handle func(response MethodResponse)) methodHandler {
 }
 
 var methodHandlers = map[CoreMethod]methodHandler{
+	privacyCapabilitiesMethod: withoutArguments(func(response MethodResponse) {
+		response.success(map[string]int{"version": 1})
+	}),
 	initClashMethod: withArguments(func(params *InitParams, response MethodResponse) {
 		response.success(handleInitClash(params))
 	}),

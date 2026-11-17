@@ -257,7 +257,8 @@ enum CoreWorkKind {
     WORK_LAUNCH = 1,
     WORK_INSPECT = 2,
     WORK_DELAY = 3,
-    WORK_STOP = 4
+    WORK_STOP = 4,
+    WORK_PROXY_LAUNCH = 5
 };
 
 struct CoreWork {
@@ -282,6 +283,8 @@ static void ExecuteCoreWork(napi_env env, void* data) {
         request->error = FlClashInspectProfile(request->home);
     } else if (request->kind == WORK_LAUNCH) {
         request->error = FlClashLaunchAtEpoch(request->home, request->secret, request->epoch);
+    } else if (request->kind == WORK_PROXY_LAUNCH) {
+        request->error = FlClashLaunchProxyAtEpoch(request->home, request->secret, request->epoch);
     } else {
         request->started = FlClashStartTunAtEpoch(request->fd, request->epoch);
         request->fd = -1;
@@ -343,7 +346,7 @@ static napi_value QueueCoreWork(napi_env env, CoreWork* request) {
     return promise;
 }
 
-static napi_value LaunchAsync(napi_env env, napi_callback_info info) {
+static napi_value QueueLaunch(napi_env env, napi_callback_info info, int kind) {
     size_t argc = 2;
     napi_value args[2] = {nullptr};
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
@@ -368,8 +371,16 @@ static napi_value LaunchAsync(napi_env env, napi_callback_info info) {
         std::free(request);
         return nullptr;
     }
-    request->kind = WORK_LAUNCH;
+    request->kind = kind;
     return QueueCoreWork(env, request);
+}
+
+static napi_value LaunchAsync(napi_env env, napi_callback_info info) {
+    return QueueLaunch(env, info, WORK_LAUNCH);
+}
+
+static napi_value LaunchProxyAsync(napi_env env, napi_callback_info info) {
+    return QueueLaunch(env, info, WORK_PROXY_LAUNCH);
 }
 
 static napi_value TestProfileDelay(napi_env env, napi_callback_info info) {
@@ -554,6 +565,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"startTun", nullptr, StartTun, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getTunError", nullptr, GetTunError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"launchAsync", nullptr, LaunchAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"launchProxyAsync", nullptr, LaunchProxyAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"startTunAsync", nullptr, StartTunAsync, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopAsync", nullptr, StopAsync, nullptr, nullptr, nullptr, napi_default, nullptr},

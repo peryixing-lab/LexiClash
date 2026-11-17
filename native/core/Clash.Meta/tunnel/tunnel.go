@@ -316,6 +316,9 @@ func preHandleMetadata(metadata *C.Metadata) error {
 }
 
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
+	if privacyBlocksPacket(metadata, nil) {
+		return proxies["REJECT"], nil, nil
+	}
 	if metadata.SpecialProxy != "" {
 		var exist bool
 		proxy, exist = proxies[metadata.SpecialProxy]
@@ -399,6 +402,9 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		helper.FindProcess = nil
 	}
 
+	if guardRule := privacyMatch(metadata, helper); guardRule != nil {
+		return proxies["REJECT"], guardRule, nil
+	}
 	switch mode {
 	case Direct:
 		proxy = proxies["DIRECT"]
@@ -431,6 +437,10 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	if privacyBlocksPacket(metadata, packet.Data()) {
+		packet.Drop()
+		return
+	}
 
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
@@ -517,6 +527,9 @@ func handleTCPConn(connCtx C.ConnContext) {
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
 
+	if privacyBlocksPacket(metadata, nil) {
+		return
+	}
 	preHandleFailed := false
 	if err := preHandleMetadata(metadata); err != nil {
 		log.Debugln("[Metadata PreHandle] error: %s", err)
@@ -684,7 +697,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 
 				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
 					log.Debugln("%s UDP is not supported", adapter.Name())
-					continue
+					return proxies["REJECT"], rule, nil
 				}
 
 				return adapter, rule, nil

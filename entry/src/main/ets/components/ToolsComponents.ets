@@ -2,6 +2,8 @@ import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
 // ToolsComponents.ets — Mobile FlClash Tools & Settings View with ImmersivePage
 
 import { ImmersiveTitlePage } from './ImmersiveTitlePage';
+import { AppAccessSettingsView } from './AppAccessSettingsView';
+import { TunSettingsView } from './TunSettingsView';
 import { BackNavigationCoordinator, ImmersiveBackButton, ImmersivePageTransition } from './ImmersiveBackButton';
 import { ResponsiveLayout } from '../common/ResponsiveLayout';
 import {
@@ -13,7 +15,6 @@ import {
 import { FlClashColorPalette, I18n, SeedPresetItem, ThemeManager } from '../common/ThemeManager';
 import { CoreController } from '../core/CoreController';
 import {
-  AppAccessItem,
   ColorStyleKind,
   LexiMonitorTab,
   NavBarStyleKind,
@@ -29,6 +30,7 @@ export type ToolsSubPageKind =
     | 'logs'
     | 'language'
     | 'theme'
+    | 'tun'
     | 'access'
     | 'backup'
     | 'advanced'
@@ -253,6 +255,7 @@ export struct ToolsMainView {
     const lang: string = this.selectedLocaleLang;
     if (key === 'language') return I18n.t('language', lang);
     if (key === 'theme') return I18n.t('theme', lang);
+    if (key === 'tun') return lang === 'en_US' ? 'TUN Mode' : 'TUN 模式';
     if (key === 'access') return I18n.t('accessControl', lang);
     if (key === 'backup') return I18n.t('backupRestore', lang);
     if (key === 'advanced') return I18n.t('advancedConfig', lang);
@@ -377,6 +380,16 @@ export struct ToolsMainView {
                       onTapAction: (): void => {
                         this.openSubPage('theme');
                       }
+                    })
+                    Divider().color(this.palette.divider).strokeWidth(0.5).margin({ left: 68, right: 16 })
+                    ToolsGroupedRowItem({
+                      iconRes: $r('sys.symbol.shield_checkered'),
+                      titleText: this.selectedLocaleLang === 'en_US' ? 'TUN Mode' : 'TUN 模式',
+                      subtitleText: (this.revisionTick >= 0 && this.store.vpnEnabled)
+                        ? (this.selectedLocaleLang === 'en_US' ? 'Active' : '已开启')
+                        : (this.selectedLocaleLang === 'en_US' ? 'Off' : '未开启'),
+                      palette: this.palette,
+                      onTapAction: (): void => { this.openSubPage('tun'); }
                     })
                     Divider().color(this.palette.divider).strokeWidth(0.5).margin({ left: 68, right: 16 })
                     ToolsGroupedRowItem({
@@ -715,92 +728,28 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
+          } else if (this.activeSettingsKey() === 'tun') {
+            Scroll() {
+              Column() {
+                TunSettingsView({ palette: this.palette, revisionTick: this.revisionTick })
+              }
+              .width('100%')
+              .constraintSize({ maxWidth: ResponsiveLayout.readingMaxWidth(this.windowWidthVp) })
+              .padding({
+                left: ResponsiveLayout.horizontalPadding(this.windowWidthVp),
+                right: ResponsiveLayout.horizontalPadding(this.windowWidthVp),
+                bottom: ResponsiveLayout.secondaryBottomPadding(this.bottomInset)
+              })
+            }
+            .contentStartOffset(64 + this.titleTopInset)
+            .contentEndOffset(this.bottomInset)
+            .layoutWeight(1)
+            .width('100%')
+            .align(Alignment.Top)
           } else if (this.activeSettingsKey() === 'access') {
             Scroll() {
               Column({ space: 12 }) {
-                this.switchSettingRow(
-                  '应用访问控制',
-                  this.store.accessControlEnabled
-                    ? (this.store.accessControlMode === 'whitelist'
-                      ? '只允许选中应用进入 VPN'
-                      : '选中应用将会被排除在 VPN 之外')
-                    : '应用分流尚未接入 VPN 隧道',
-                  this.store.accessControlEnabled,
-                  (v: boolean): void => {
-                    this.store.accessControlEnabled = v;
-                    this.store.notify();
-                  }, false
-                )
-
-                Row({ space: 8 }) {
-                  Text('白名单模式')
-                    .fontSize(12)
-                    .fontWeight(FontWeight.Bold)
-                    .fontColor(this.store.accessControlMode === 'whitelist' ? this.palette.onPrimary : this.palette.onSurface)
-                    .padding({ top: 9, bottom: 9 })
-                    .backgroundColor(this.store.accessControlMode === 'whitelist' ? this.palette.primary : this.palette.card)
-                    .borderRadius(16)
-                    .layoutWeight(1)
-                    .textAlign(TextAlign.Center)
-                    .onClick((): void => {
-                      this.store.accessControlMode = 'whitelist';
-                      this.store.notify();
-                    })
-
-                  Text('黑名单模式')
-                    .fontSize(12)
-                    .fontWeight(FontWeight.Bold)
-                    .fontColor(this.store.accessControlMode === 'blacklist' ? this.palette.onPrimary : this.palette.onSurface)
-                    .padding({ top: 9, bottom: 9 })
-                    .backgroundColor(this.store.accessControlMode === 'blacklist' ? this.palette.primary : this.palette.card)
-                    .borderRadius(16)
-                    .layoutWeight(1)
-                    .textAlign(TextAlign.Center)
-                    .onClick((): void => {
-                      this.store.accessControlMode = 'blacklist';
-                      this.store.notify();
-                    })
-                }
-                .width('100%')
-
-                if (this.store.appAccessList.length === 0) {
-                  Text('暂无应用列表数据')
-                    .fontSize(13)
-                    .fontColor(this.palette.onSurfaceVariant)
-                    .padding({ top: 24 })
-                } else {
-                  ForEach(
-                    this.store.appAccessList,
-                    (appItem: AppAccessItem) => {
-                      Row({ space: 12 }) {
-                        Column({ space: 2 }) {
-                          Text(appItem.appName)
-                            .fontSize(15)
-                            .fontWeight(FontWeight.Bold)
-                            .fontColor(this.palette.onSurface)
-                          Text(appItem.bundleName)
-                            .fontSize(11)
-                            .fontColor(this.palette.onSurfaceVariant)
-                        }
-                        .alignItems(HorizontalAlign.Start)
-                        .layoutWeight(1)
-
-                        Toggle({ type: ToggleType.Checkbox, isOn: appItem.isSelected })
-                          .selectedColor(this.palette.primary)
-                          .onChange((v: boolean): void => {
-                            appItem.isSelected = v;
-                            this.store.notify();
-                          })
-                      }
-                      .width('100%')
-                      .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-                      .backgroundColor(this.palette.card)
-                      .borderRadius(22)
-                      .alignItems(VerticalAlign.Center)
-                    },
-                    (appItem: AppAccessItem): string => `${appItem.bundleName}_${appItem.isSelected}`
-                  )
-                }
+                AppAccessSettingsView({ palette: this.palette, revisionTick: this.revisionTick })
               }
               .width('100%')
               .constraintSize({ maxWidth: ResponsiveLayout.readingMaxWidth(this.windowWidthVp) })
@@ -1004,48 +953,31 @@ export struct ToolsMainView {
                 .borderRadius(26)
                 .alignItems(HorizontalAlign.Start)
 
-                Column({ space: 10 }) {
-                  Text('栈模式')
-                    .fontSize(15)
-                    .fontWeight(FontWeight.Bold)
-                    .fontColor(this.palette.onSurface)
-
-                  Row({ space: 8 }) {
-                    ForEach(
-                      ['gvisor', 'system', 'mixed'],
-                      (stk: string) => {
-                        Text(stk)
-                          .fontSize(12)
-                          .fontWeight(FontWeight.Bold)
-                          .fontColor(this.store.tunStack === stk ? this.palette.onPrimary : this.palette.onSurface)
-                          .padding({ top: 8, bottom: 8 })
-                          .backgroundColor(this.store.tunStack === stk ? this.palette.primary : this.palette.block)
-                          .borderRadius(14)
-                          .layoutWeight(1)
-                          .textAlign(TextAlign.Center)
-                          .onClick((): void => {
-                            this.store.tunStack = stk;
-                            this.store.notify();
-                          })
-                      },
-                      (stk: string): string => stk
-                    )
-                  }
-                  .width('100%')
-                }
-                .width('100%')
-                .padding(18)
-                .backgroundColor(this.palette.card)
-                .borderRadius(26)
-                .alignItems(HorizontalAlign.Start)
+                ToolsGroupedRowItem({
+                  iconRes: $r('sys.symbol.shield_checkered'),
+                  titleText: this.selectedLocaleLang === 'en_US' ? 'TUN Settings' : 'TUN 设置',
+                  subtitleText: this.selectedLocaleLang === 'en_US' ? 'Stack, MTU and connection status' : '协议栈、MTU 与连接状态',
+                  palette: this.palette,
+                  onTapAction: (): void => { this.openSubPage('tun'); }
+                })
 
                 this.switchSettingRow(
                   'IPv6',
-                  '开启 IPv6 后才会接收 IPv6 流量。',
+                  '关闭时拦截 IPv6；开启后通过 VPN 处理。',
                   this.store.ipv6Enabled,
                   (v: boolean): void => {
                     this.store.ipv6Enabled = v;
-                    this.store.notify();
+                    this.store.applyNetworkSettings();
+                  }
+                )
+
+                this.switchSettingRow(
+                  'WebRTC 防泄露',
+                  '拦截 STUN 探测，可能影响语音、视频和 P2P 连接。',
+                  this.store.blockStun,
+                  (v: boolean): void => {
+                    this.store.blockStun = v;
+                    this.store.applyNetworkSettings();
                   }
                 )
 
@@ -1055,7 +987,7 @@ export struct ToolsMainView {
                   this.store.snifferEnabled,
                   (v: boolean): void => {
                     this.store.snifferEnabled = v;
-                    this.store.notify();
+                    this.store.applyNetworkSettings();
                   }
                 )
               }
@@ -1225,7 +1157,7 @@ export struct ToolsMainView {
                     .fontWeight(FontWeight.Bold)
                     .fontColor(this.palette.onSurface)
 
-                  Text('v1.0.0')
+                  Text('v1.0.1')
                     .fontSize(13)
                     .fontWeight(FontWeight.Medium)
                     .fontColor(this.palette.primary)

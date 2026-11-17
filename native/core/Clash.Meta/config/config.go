@@ -193,24 +193,26 @@ type TLS struct {
 
 // Config is mihomo config manager
 type Config struct {
-	General       *General
-	Controller    *Controller
-	Experimental  *Experimental
-	IPTables      *IPTables
-	NTP           *NTP
-	DNS           *DNS
-	Hosts         *trie.DomainTrie[resolver.HostValue]
-	Profile       *Profile
-	Rules         []C.Rule
-	SubRules      map[string][]C.Rule
-	Users         []auth.AuthUser
-	Proxies       map[string]C.Proxy
-	Listeners     map[string]C.InboundListener
-	Providers     map[string]P.ProxyProvider
-	RuleProviders map[string]P.RuleProvider
-	Tunnels       []LC.Tunnel
-	Sniffer       *sniffer.Config
-	TLS           *TLS
+	LexiSelections map[string]string
+	Privacy        *T.PrivacyPolicy
+	General        *General
+	Controller     *Controller
+	Experimental   *Experimental
+	IPTables       *IPTables
+	NTP            *NTP
+	DNS            *DNS
+	Hosts          *trie.DomainTrie[resolver.HostValue]
+	Profile        *Profile
+	Rules          []C.Rule
+	SubRules       map[string][]C.Rule
+	Users          []auth.AuthUser
+	Proxies        map[string]C.Proxy
+	Listeners      map[string]C.InboundListener
+	Providers      map[string]P.ProxyProvider
+	RuleProviders  map[string]P.RuleProvider
+	Tunnels        []LC.Tunnel
+	Sniffer        *sniffer.Config
+	TLS            *TLS
 }
 
 type RawCors struct {
@@ -397,6 +399,7 @@ type RawTLS struct {
 }
 
 type RawConfig struct {
+	LexiClash                     *RawLexiClash           `yaml:"lexiclash" json:"lexiclash,omitempty"`
 	Port                          int                     `yaml:"port" json:"port"`
 	SocksPort                     int                     `yaml:"socks-port" json:"socks-port"`
 	RedirPort                     int                     `yaml:"redir-port" json:"redir-port"`
@@ -617,6 +620,11 @@ func UnmarshalRawConfig(buf []byte) (*RawConfig, error) {
 }
 
 func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
+	var policyErr error
+	rawCfg, policyErr = applyLexiClashPolicy(rawCfg)
+	if policyErr != nil {
+		return nil, policyErr
+	}
 	config := &Config{}
 	log.Infoln("Start initial configuration in progress") //Segment finished in xxm
 	startTime := time.Now()
@@ -674,6 +682,10 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	config.Proxies = proxies
+	selectLexiClashProxies(rawCfg.LexiClash, proxies)
+	if rawCfg.LexiClash != nil {
+		config.LexiSelections = rawCfg.LexiClash.Selections
+	}
 	config.Providers = providers
 
 	listeners, err := parseListeners(rawCfg)
@@ -701,6 +713,14 @@ func ParseRawConfig(rawCfg *RawConfig) (*Config, error) {
 		return nil, err
 	}
 	config.Rules = rules
+	if rawCfg.LexiClash != nil {
+		guardRules, err := parseRules(rawCfg.LexiClash.rejectRules(), proxies, ruleProviders, subRules, "privacy rules")
+		if err != nil {
+			return nil, err
+		}
+		config.Privacy = &T.PrivacyPolicy{Rules: guardRules, BlockSTUN: rawCfg.LexiClash.BlockSTUN,
+			BlockIPv6: !rawCfg.LexiClash.IPv6, BlockDirectDNS: rawCfg.Mode != T.Direct}
+	}
 
 	hosts, err := parseHosts(rawCfg)
 	if err != nil {

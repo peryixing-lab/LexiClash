@@ -12,6 +12,6 @@
 ## SHA-256
 
 ```text
-562b61a31cfaf8788c2830f0ad2f587689fdfc53c7de2455100bbc5241cc79e6  entry/libs/arm64-v8a/libflclash_core.so
-e05b530744f294564de3799320f39ead7dbc1db74e787cce9e99ad8d9642f285  entry/src/main/cpp/prebuilt/arm64-v8a/flclash_core.h
+69a198450f08c8d74b8b1cd2ae2fecb8faf752f00e7218619b1a4f3551915503  entry/libs/arm64-v8a/libflclash_core.so
+259659e487be797d7fb8fec0542e5f0e7ab25d780674afd7fb6e918e9c49a630  entry/src/main/cpp/prebuilt/arm64-v8a/flclash_core.h
 ```

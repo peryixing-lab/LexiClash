@@ -1714,7 +1714,7 @@ export class ClashUriParser {
       'allow-lan: false',
       'mode: rule',
       'log-level: info',
-      'ipv6: true',
+      'ipv6: false',
       'unified-delay: true',
       'tcp-concurrent: true',
       '',
@@ -1723,8 +1723,7 @@ export class ClashUriParser {
       '  enhanced-mode: fake-ip',
       '  fake-ip-range: 198.18.0.1/16',
       '  nameserver:',
-      '    - https://doh.pub/dns-query',
-      '    - 223.5.5.5',
+      '    - https://1.1.1.1/dns-query',
       '',
       'proxies:'
     ];

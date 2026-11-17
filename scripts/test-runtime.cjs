@@ -21,9 +21,9 @@ function runtime({
   const vpnState = {
     observerCount: 0, observerCallback: null, unsubscribed: 0,
     startCalls: [], stopCalls: [], tunCreates: [], tunDestroyed: 0, closedFds: [],
-    nativeLaunchCalls: [], nativeStartTunCalls: [], nativeStopCalls: 0,
+    nativeLaunchCalls: [], proxyLaunchCalls: [], nativeStartTunCalls: [], nativeStopCalls: 0,
     physicalNetId: 100, netConnections: [], keepAliveStarts: [], keepAliveStops: 0,
-    keepAliveCancelCb: null
+    keepAliveCancelCb: null, notifications: []
   };
   const native = {
     nativeInitCore: () => JSON.stringify({ id: 0, result: loaded ? { initialized: true } : null, error: loaded ? null : 'CORE_UNAVAILABLE' }),
@@ -34,11 +34,15 @@ function runtime({
       const request = JSON.parse(raw);
       calls.push(request);
       return JSON.stringify({ id: wrongId ? 'wrong-id' : request.id,
-        result: resultFor ? resultFor(request) : request.method === 'proxy.testDelay' ? { value: 48 } : { ok: true }, error: fail(request, calls) });
+        result: request.method === 'privacy.capabilities' ? { version: 1 } : resultFor ? resultFor(request) : request.method === 'proxy.testDelay' ? { value: 48 } : { ok: true }, error: fail(request, calls) });
     },
     launchAsync: async (filesDir, secret) => {
       vpnState.nativeLaunchCalls.push({ filesDir, secret });
       return vpnHooks.launchAsync ? vpnHooks.launchAsync(filesDir, secret) : '';
+    },
+    launchProxyAsync: async (filesDir, secret) => {
+      vpnState.proxyLaunchCalls.push({ filesDir, secret });
+      return vpnHooks.launchProxyAsync ? vpnHooks.launchProxyAsync(filesDir, secret) : '';
     },
     startTunAsync: async fd => {
       vpnState.nativeStartTunCalls.push(fd);
@@ -62,6 +66,7 @@ function runtime({
     http: {
       RequestMethod: { GET: 'GET', HEAD: 'HEAD', PATCH: 'PATCH', PUT: 'PUT', POST: 'POST', DELETE: 'DELETE' },
       HttpDataType: { STRING: 0 },
+      AddressFamily: { ONLY_V4: 1 },
       createHttp: () => ({
         request: async (url, options) => {
           httpState.requests.push({ url, options });
@@ -98,6 +103,7 @@ function runtime({
     },
     VpnExtensionAbility: class VpnExtensionAbility { constructor() { this.context = { filesDir: '/sandbox' }; } },
     connection: {
+      NetCap: { NET_CAPABILITY_INTERNET: 12, NET_CAPABILITY_NOT_VPN: 15 },
       getDefaultNet: async () => ({ netId: vpnState.physicalNetId }),
       getDefaultNetSync: () => ({ netId: vpnState.physicalNetId }),
       getConnectionProperties: async () => ({ linkAddresses: [] }),
@@ -125,14 +131,18 @@ function runtime({
       if (specifier === '@kit.ArkTS') return { buffer: { Buffer, from: Buffer.from } };
       if (specifier === '@kit.CoreFileKit') return { fileIo: fakeFs };
       if (specifier === '@kit.NetworkKit') return network;
+      if (specifier === '@kit.NotificationKit') return { notificationManager: {
+        SlotType: { LIVE_VIEW: 6 }, ContentType: { NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW: 5 },
+        publish: async request => { vpnState.notifications.push(request); }
+      } };
       if (specifier === '@kit.BackgroundTasksKit') return {
         backgroundTaskManager: {
           BackgroundMode: { DATA_TRANSFER: 1, TASK_KEEPING: 9 },
           BackgroundTaskMode: { MODE_DATA_TRANSFER: 1, MODE_TASK_KEEPING: 9 },
-          BackgroundTaskSubmode: { SUBMODE_NORMAL_NOTIFICATION: 2 },
+          BackgroundTaskSubmode: { SUBMODE_NORMAL_NOTIFICATION: 2, SUBMODE_LIVE_VIEW_NOTIFICATION: 3 },
           ContinuousTaskRequest: class { isModeSupported() { return false; } },
           on: (_type, cb) => { vpnState.keepAliveCancelCb = cb; },
-          startBackgroundRunning: async (_ctx, mode) => { vpnState.keepAliveStarts.push(mode); },
+          startBackgroundRunning: async (_ctx, mode) => { vpnState.keepAliveStarts.push(mode); return { notificationId: 71, continuousTaskId: 91 }; },
           stopBackgroundRunning: async () => { vpnState.keepAliveStops += 1; },
           getAllContinuousTasks: async () => vpnState.keepAliveStarts.length > vpnState.keepAliveStops ? [{ id: 1 }] : []
         }
@@ -184,10 +194,12 @@ function runtime({
   const { ResponsiveLayout } = load(path.join(root, 'entry/src/main/ets/common/ResponsiveLayout.ets'));
   const { BackgroundKeepAlive } = load(path.join(root, 'entry/src/main/ets/core/BackgroundKeepAlive.ets'));
   const { VpnAuthorization } = load(path.join(root, 'entry/src/main/ets/core/VpnAuthorization.ets'));
+  const { AppAccessControl } = load(path.join(root, 'entry/src/main/ets/core/AppAccessControl.ets'));
+  const { TunConfig } = load(path.join(root, 'entry/src/main/ets/core/TunConfig.ets'));
   const LexiVpnExtension = load(path.join(root, 'entry/src/main/ets/vpnextension/LexiVpnExtension.ets')).default;
   const store = AppStateStore.getInstance();
   store.initialize('/sandbox');
-  return { chain: ProxyChainConfig, uriParser: ClashUriParser, parser: YamlProfileParser, ThemeManager, ResponsiveLayout, BackgroundKeepAlive, store, AppStateStore, controller: CoreController.getInstance(), VpnAuthorization, LexiVpnExtension, vpnState, calls, disk, httpState, dispose };
+  return { chain: ProxyChainConfig, uriParser: ClashUriParser, parser: YamlProfileParser, ThemeManager, ResponsiveLayout, BackgroundKeepAlive, store, AppStateStore, controller: CoreController.getInstance(), VpnAuthorization, AppAccessControl, TunConfig, LexiVpnExtension, vpnState, calls, disk, httpState, dispose };
 }
 
 const fixture = `mixed-port: 7890
@@ -386,7 +398,7 @@ test('Connection: failed exit selection rolls back full runtime config', async (
   pair(r); r.store.toggleRunning();
   assert.equal(r.store.connectProxyChain(), 'cannot select');
   assert.equal(r.calls.at(-1).method, 'config.setup');
-  assert.equal(r.disk.get(r.calls.at(-1).arguments.base.path), fixture);
+  assert.equal(r.disk.get(r.calls.at(-1).arguments.base.path), r.store.runtimeYaml(fixture));
   assert.equal(r.store.chainConnected, false);
 });
 test('Lifecycle: listener failure does not mark the application running', async () => {
@@ -538,7 +550,8 @@ test('VPN: toggleRunningAsync launches LexiVpnExtension, creates TUN, patches mo
     assert.deepEqual(r.vpnState.nativeStartTunCalls, [77]);
     assert.equal(r.vpnState.tunCreates[0].mtu, 1400);
     assert.deepEqual(Array.from(r.vpnState.tunCreates[0].dnsAddresses), ['172.19.0.2']);
-    assert.equal(currentMode, 'global');
+    assert.match(r.disk.get('/sandbox/config.yaml'), /^mode: global$/m);
+    assert.equal(r.httpState.requests.some(req => req.options.method === 'PATCH'), false);
     assert.equal(JSON.parse(r.disk.get('/sandbox/proxy-selections.json')).Proxy, 'C');
     assert.equal(JSON.parse(r.disk.get('/sandbox/vpn-status.json')).status, 'running');
 
@@ -913,9 +926,13 @@ test('VPN Outbound Mode: switching rule/global/direct syncs GLOBAL group & flush
     r.store.setOutboundMode('direct');
     await new Promise(res => setTimeout(res, 60));
     assert.equal(currentMode, 'direct');
+    let reloaded = r.httpState.requests.filter(req => req.url.includes('/configs?force=true')).at(-1);
+    assert.equal(JSON.parse(JSON.parse(reloaded.options.extraData).payload.split('\n').find(line => line.startsWith('lexiclash: ')).slice(11)).mode, 'direct');
     r.store.setOutboundMode('rule');
     await new Promise(res => setTimeout(res, 60));
     assert.equal(currentMode, 'rule');
+    reloaded = r.httpState.requests.filter(req => req.url.includes('/configs?force=true')).at(-1);
+    assert.equal(JSON.parse(JSON.parse(reloaded.options.extraData).payload.split('\n').find(line => line.startsWith('lexiclash: ')).slice(11)).mode, 'rule');
 
     await r.store.toggleRunningAsync();
   } finally {
@@ -971,7 +988,7 @@ test('ResponsiveLayout: computes phone, tablet, and PC 2in1 breakpoints', () => 
   assert.equal(ResponsiveLayout.secondaryBottomPadding(14), 42);
 });
 
-test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous task, pauses/resumes polling, and recovers on netId change', async () => {
+test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous task, pauses/resumes polling, and keeps the tunnel on netId change', async () => {
   let extension = null;
   const r = runtime({
     loaded: true,
@@ -989,7 +1006,7 @@ test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous t
         if (url.endsWith('/configs') && options.method === 'PATCH') return { responseCode: 204, result: '' };
         if (url.endsWith('/configs')) return { responseCode: 200, result: JSON.stringify({ mode: 'rule' }) };
         if (url.includes('/proxies/')) return { responseCode: 200, result: JSON.stringify({ now: '出口 B' }) };
-        if (url.endsWith('/connections')) return { responseCode: 200, result: JSON.stringify({ uploadTotal: 0, downloadTotal: 0, connections: [] }) };
+        if (url.endsWith('/connections')) return { responseCode: 200, result: JSON.stringify({ uploadTotal: 1048576, downloadTotal: 2097152, connections: [] }) };
         if (url.endsWith('/cache/fakeip/flush')) return { responseCode: 204, result: '' };
         return { responseCode: 200, result: '{}' };
       }
@@ -1002,6 +1019,7 @@ test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous t
     assert.equal(started, true);
     assert.ok(r.disk.get('/sandbox/config.yaml').includes('keep-alive-interval: 15'));
     assert.ok(r.disk.get('/sandbox/config.yaml').includes('keep-alive-idle: 60'));
+    await new Promise(resolve => setTimeout(resolve, 15)); // Notifications finish after connection readiness.
     assert.equal(r.vpnState.keepAliveStarts.length, 1);
     assert.equal(r.BackgroundKeepAlive.isActive(), true);
 
@@ -1016,25 +1034,39 @@ test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous t
     await new Promise(res => setTimeout(res, 25));
     const reqsAtBg = r.httpState.requests.length;
     await new Promise(res => setTimeout(res, 35));
-    assert.equal(r.httpState.requests.length, reqsAtBg);
+    // Accelerated timers run several two-minute notification updates in this window.
+    const bgRequests = r.httpState.requests.slice(reqsAtBg);
+    assert.ok(bgRequests.length > 0 && bgRequests.every(req => req.url.endsWith('/connections')));
+    assert.ok(r.vpnState.notifications.length >= 2);
+    assert.equal(r.vpnState.notifications.at(-1).id, 71);
+    assert.equal(r.vpnState.notifications.at(-1).content.systemLiveView.text, '已传输 3.00 MiB');
     r.store.setAppInForeground(true);
     await new Promise(res => setTimeout(res, 40));
     assert.equal(r.store.isRunning, true);
 
-    // Physical network netId change triggers debounced clean VPN rebuild
+    // Handover releases upstream sockets while preserving the same system VPN.
     const conn = r.vpnState.netConnections[r.vpnState.netConnections.length - 1];
     const startCallsBefore = r.vpnState.startCalls.length;
+    const beforeHandover = r.httpState.requests.length;
+    r.store.setAppInForeground(false);
+    conn._emit('netAvailable', { netId: 100 });
     conn._emit('netAvailable', { netId: 202 });
     const waitDeadline = Date.now() + 500;
-    while (Date.now() < waitDeadline && (r.vpnState.startCalls.length <= startCallsBefore || r.store.isRecoveringNetwork)) {
+    const closedUpstream = () => r.httpState.requests.slice(beforeHandover).some(req => req.url.endsWith('/connections') && req.options.method === 'DELETE');
+    while (Date.now() < waitDeadline && !closedUpstream()) {
       await new Promise(res => setTimeout(res, 15));
     }
-    assert.ok(r.vpnState.startCalls.length > startCallsBefore);
+    assert.ok(closedUpstream());
+    assert.equal(r.vpnState.startCalls.length, startCallsBefore);
+    assert.equal(r.vpnState.tunDestroyed, 0);
     assert.equal(r.store.isRunning, true);
 
     await r.store.toggleRunningAsync();
     assert.equal(r.vpnState.keepAliveStops, 1);
     assert.equal(r.BackgroundKeepAlive.isActive(), false);
+    const stoppedCount = r.vpnState.notifications.length;
+    await new Promise(res => setTimeout(res, 30));
+    assert.equal(r.vpnState.notifications.length, stoppedCount);
   } finally {
     r.BackgroundKeepAlive.setAbilityContext(null);
     r.dispose();
@@ -1051,6 +1083,494 @@ test('Startup: awaitStartupReadyAsync resolves within maxWaitMs even when contro
     r.dispose();
   }
 });
+
+test('Privacy: runtime policy merges overrides and settings without rewriting subscription fields', async () => {
+  const r = await imported({ loaded: true });
+  try {
+    r.store.overrideRules = [
+      { id: 'on', ruleType: 'DST-PORT', payload: '19302', targetGroup: 'REJECT', enabled: true, noResolve: false },
+      { id: 'off', ruleType: 'DST-PORT', payload: '80', targetGroup: 'REJECT', enabled: false, noResolve: false }
+    ];
+    r.store.ipv6Enabled = true;
+    r.store.snifferEnabled = false;
+    r.store.dnsNameserver = 'https://resolver.example/dns-query';
+    const yaml = r.store.buildVpnRuntimeYaml(fixture);
+    const policy = JSON.parse(yaml.split('\n').find(line => line.startsWith('lexiclash: ')).slice('lexiclash: '.length));
+    assert.deepEqual(policy.rules, ['DST-PORT,19302,REJECT']);
+    assert.equal(policy.ipv6, true);
+    assert.equal(policy.sniffer, false);
+    assert.deepEqual(policy.nameservers, ['https://resolver.example/dns-query']);
+    assert.equal(policy.selections.Proxy, '入口, A');
+    const result = spawnSync('python3', ['-c', 'import json,sys,yaml; a,b=json.load(sys.stdin); a=yaml.safe_load(a); b=yaml.safe_load(b); assert a["proxies"]==b["proxies"]; assert a["rules"]==b["rules"]'], { input: JSON.stringify([fixture, yaml]), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(r.store.getCurrentProfile().yamlContent, fixture);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: recompilation handles YAML document markers and replaces stale policy', async () => {
+  const r = await imported();
+  try {
+    const yaml = r.store.buildVpnRuntimeYaml('---\n' + fixture + '...\n');
+    const again = r.store.buildVpnRuntimeYaml(yaml);
+    assert.equal(again, yaml);
+    assert.equal((again.match(/^lexiclash:/gm) || []).length, 1);
+    const result = spawnSync('python3', ['-c', 'import sys,yaml; d=yaml.safe_load(sys.stdin.read()); assert d["lexiclash"]["version"]==1'], { input: again, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.throws(() => r.store.buildVpnRuntimeYaml('---\nmode: rule\n---\nmode: direct'), /多文档/);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: proxy-chain DNS pins the exit while TCP-only chains remain usable', async () => {
+  const r = await imported();
+  try {
+    pair(r);
+    const compiled = r.store.buildProxyChainPreview();
+    assert.equal(compiled.errorMessage, '');
+    const policy = JSON.parse(compiled.yamlContent.split('\n').find(line => line.startsWith('lexiclash: ')).slice(11));
+    assert.equal(policy.dnsProxy, '出口 B');
+    assert.equal(policy.selections.Proxy, '出口 B');
+    assert.match(r.store.getProxyChainUdpWarning(), /UDP.*拒绝/);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: network settings survive restart', async () => {
+  const r = await imported();
+  try {
+    r.store.ipv6Enabled = true; r.store.blockStun = false;
+    r.store.dnsNameserver = 'https://resolver.example/dns-query';
+    r.store.persistState();
+    r.store.ipv6Enabled = false; r.store.blockStun = true;
+    r.store.initialize('/sandbox');
+    assert.equal(r.store.ipv6Enabled, true);
+    assert.equal(r.store.blockStun, false);
+    assert.equal(r.store.dnsNameserver, 'https://resolver.example/dns-query');
+  } finally { r.dispose(); }
+});
+
+test('Privacy: old core cannot silently ignore the privacy policy', async () => {
+  const r = await imported({ loaded: true, fail: req => req.method === 'privacy.capabilities' ? 'unknown method' : null });
+  try {
+    assert.equal(await r.store.toggleRunningAsync(), false);
+    assert.equal(r.vpnState.nativeLaunchCalls.length, 0);
+    assert.match(r.store.lastOperationError, /防泄露策略/);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: rejected reload preserves restart config and active tunnel', async () => {
+  let rejected = true;
+  const r = runtime({ loaded: true, vpnHooks: { httpHandler: () => ({ responseCode: rejected ? 400 : 200, result: rejected ? 'invalid profile' : '' }) } });
+  try {
+    r.disk.set('/sandbox/config.yaml', fixture);
+    await assert.rejects(r.store.vpnManager.reloadRuntimeConfig('invalid', {}, 'rule'), /HTTP 400/);
+    assert.equal(r.disk.get('/sandbox/config.yaml'), fixture);
+    assert.equal(r.vpnState.tunDestroyed, 0);
+    rejected = false;
+    await r.store.vpnManager.reloadRuntimeConfig(fixture, {}, '');
+    assert.equal(r.disk.get('/sandbox/config.yaml'), fixture);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: unavailable controller does not remove VPN routes during a settings update', async () => {
+  const r = await imported({ loaded: true });
+  try {
+    r.store.isRunning = true; r.store.vpnEnabled = true;
+    r.store.vpnManager.isSessionHealthy = async () => false;
+    await r.store.restartVpnAfterConfigChangeAsync();
+    assert.equal(r.store.isRunning, true);
+    assert.equal(r.vpnState.nativeStopCalls, 0);
+    assert.equal(r.vpnState.tunDestroyed, 0);
+    assert.match(r.store.lastOperationError, /保留当前 VPN/);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: DNS flush clears resolver answers and preserves fake-IP mappings', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    await r.store.vpnManager.flushDnsCache();
+    assert.equal(r.httpState.requests.length, 1);
+    assert.match(r.httpState.requests[0].url, /\/cache\/dns\/flush$/);
+  } finally { r.dispose(); }
+});
+
+test('Privacy: overlapping reloads cannot apply an older config after a newer one', async () => {
+  const order = [];
+  const r = runtime({ loaded: true, vpnHooks: { httpHandler: async (url, options) => {
+    if (url.includes('/configs?force=true')) {
+      const name = JSON.parse(options.extraData).payload;
+      order.push(name + ':start');
+      if (name === 'first') await new Promise(resolve => setTimeout(resolve, 15));
+      order.push(name + ':end');
+    }
+    return { responseCode: 200, result: '' };
+  } } });
+  try {
+    await Promise.all([r.store.vpnManager.reloadRuntimeConfig('first', {}, ''), r.store.vpnManager.reloadRuntimeConfig('second', {}, '')]);
+    assert.deepEqual(order, ['first:start', 'first:end', 'second:start', 'second:end']);
+    assert.equal(r.disk.get('/sandbox/config.yaml'), 'second');
+  } finally { r.dispose(); }
+});
+
+test('Privacy: ordinary connections cannot fabricate DNS queries or upstream evidence', async () => {
+  const r = runtime({ loaded: true, vpnHooks: { httpHandler: () => ({ responseCode: 200, result: JSON.stringify({
+    uploadTotal: 1, downloadTotal: 2, connections: [{ id: 'one', metadata: { host: 'example.test', destinationIP: '192.0.2.1', network: 'TCP' }, chains: ['Exit'] }]
+  }) }) } });
+  try {
+    r.store.isRunning = true; r.store.vpnEnabled = true;
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ status: 'running', cleanupComplete: false }));
+    await r.store.pollLiveVpnStatsAsync();
+    assert.equal(r.store.liveConnections.length, 1);
+    assert.equal(r.store.dnsQueries.length, 0);
+    assert.equal(r.store.dnsQueriesCount, 0);
+  } finally { r.dispose(); }
+});
+
+test('App routing: saves enabled state, mode, labels and unchecked entries across restart', () => {
+  const r = runtime();
+  try {
+    assert.match(r.store.addAppAccessEntry('not a bundle', ''), /包名/);
+    assert.equal(r.store.addAppAccessEntry(' com.example.browser ', 'Browser'), '');
+    assert.equal(r.store.addAppAccessEntry('com.example.video', 'Video'), '');
+    assert.match(r.store.addAppAccessEntry('com.example.browser', ''), /已在列表/);
+    r.store.setAppAccessSelected('com.example.video', false);
+    r.store.setAppAccessEnabled(true);
+    r.store.setAppAccessMode('whitelist');
+    r.store.persistState();
+    r.store.appAccessList = []; r.store.accessControlEnabled = false; r.store.accessControlMode = 'blacklist';
+    r.store.initialize('/sandbox');
+    assert.equal(r.store.accessControlEnabled, true);
+    assert.equal(r.store.accessControlMode, 'whitelist');
+    assert.equal(r.store.appAccessList[0].appName, 'Browser');
+    assert.equal(r.store.appAccessList[1].isSelected, false);
+    assert.deepEqual(Array.from(r.store.getAppAccessPolicy().bundleNames), ['com.example.browser']);
+    r.store.removeAppAccessEntry('com.example.browser');
+    assert.match(r.AppAccessControl.validationError(r.store.getAppAccessPolicy()), /至少/);
+    // Existing state files upgrade with app routing disabled.
+    const legacy = JSON.parse(r.disk.get('/sandbox/lexiclash-state.json'));
+    delete legacy.appAccessList; delete legacy.accessControlMode; delete legacy.accessControlEnabled;
+    r.disk.set('/sandbox/lexiclash-state.json', JSON.stringify(legacy));
+    r.store.initialize('/sandbox');
+    assert.equal(r.store.accessControlEnabled, false);
+    assert.equal(r.store.appAccessList.length, 0);
+  } finally { r.dispose(); }
+});
+
+test('App routing: invalid and empty allowlists never release an existing VPN or replace its command', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    const existing = '{"sessionId":"current","action":"start"}';
+    r.disk.set('/sandbox/vpn-command.json', existing);
+    for (const policy of [
+      { enabled: true, mode: 'whitelist', bundleNames: [] },
+      { enabled: true, mode: 'blacklist', bundleNames: ['bad package'] },
+      { enabled: true, mode: 'blacklist', bundleNames: Array.from({ length: 257 }, (_, i) => `com.test.app${i}`) },
+      { enabled: true, mode: 'bogus', bundleNames: ['com.test.app'] }
+    ]) {
+      await assert.rejects(r.store.vpnManager.startVpn(fixture, {}, policy));
+    }
+    assert.equal(r.vpnState.stopCalls.length, 0);
+    assert.equal(r.disk.get('/sandbox/vpn-command.json'), existing);
+    r.store.isRunning = true; r.store.vpnEnabled = true;
+    r.store.setAppAccessEnabled(true); r.store.setAppAccessMode('whitelist');
+    assert.equal(await r.store.applyAppAccessChangesAsync(), false);
+    assert.equal(r.store.isRunning, true);
+    assert.equal(r.vpnState.stopCalls.length, 0);
+  } finally { r.dispose(); }
+});
+
+test('App routing: session command reaches system VPN allowlist and bypass list exclusively', async () => {
+  for (const mode of ['whitelist', 'blacklist', 'disabled', 'empty-blacklist', 'legacy']) {
+    const r = runtime({ loaded: true });
+    let extension;
+    try {
+      const policy = { enabled: mode !== 'disabled', mode: mode === 'whitelist' ? 'whitelist' : 'blacklist',
+        bundleNames: mode === 'empty-blacklist' ? [] : ['com.example.browser'] };
+      r.store.vpnManager.prepareStartFiles(fixture, {}, policy);
+      if (mode === 'legacy') {
+        const command = JSON.parse(r.disk.get('/sandbox/vpn-command.json'));
+        delete command.accessControl;
+        delete command.tun;
+        r.disk.set('/sandbox/vpn-command.json', JSON.stringify(command));
+      }
+      extension = new r.LexiVpnExtension(); extension.onCreate(); await extension.startup;
+      assert.equal(r.vpnState.tunCreates.length, 1);
+      const cfg = r.vpnState.tunCreates[0];
+      assert.deepEqual(cfg.trustedApplications && Array.from(cfg.trustedApplications), mode === 'whitelist' ? ['com.example.browser'] : undefined);
+      assert.deepEqual(cfg.blockedApplications && Array.from(cfg.blockedApplications), mode === 'blacklist' ? ['com.example.browser'] : undefined);
+      assert.equal(cfg.isIPv6Accepted, true);
+      const status = JSON.parse(r.disk.get('/sandbox/vpn-status.json'));
+      assert.equal(status.status, 'running');
+      assert.equal(status.accessControl.enabled, mode !== 'disabled' && mode !== 'legacy');
+    } finally {
+      if (extension) { extension.onDestroy(); await extension.stopping; }
+      r.dispose();
+    }
+  }
+});
+
+test('App routing: extension rejects an invalid allowlist before native startup', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    r.store.vpnManager.prepareStartFiles(fixture, {});
+    const command = JSON.parse(r.disk.get('/sandbox/vpn-command.json'));
+    command.accessControl = { enabled: true, mode: 'whitelist', bundleNames: [] };
+    r.disk.set('/sandbox/vpn-command.json', JSON.stringify(command));
+    const extension = new r.LexiVpnExtension(); extension.onCreate(); await extension.startup;
+    assert.equal(r.vpnState.nativeLaunchCalls.length, 0);
+    assert.equal(r.vpnState.tunCreates.length, 0);
+    assert.match(JSON.parse(r.disk.get('/sandbox/vpn-status.json')).error, /至少/);
+  } finally { r.dispose(); }
+});
+
+test('App routing: drafts do not change capture until explicit reconnect, which preserves the proxy chain', async () => {
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); },
+    httpHandler: () => ({ responseCode: 200, result: JSON.stringify({ version: 'test', mode: 'rule', now: '出口 B', uploadTotal: 0, downloadTotal: 0, connections: [] }) })
+  } });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    pair(r);
+    r.store.chainConnected = true;
+    r.store.connectedChainNames = ['入口, A', '出口 B'];
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.tunCreates.length, 1);
+    r.store.addAppAccessEntry('com.example.browser', 'Browser');
+    r.store.setAppAccessEnabled(true); r.store.setAppAccessMode('whitelist');
+    assert.equal(r.vpnState.tunCreates.length, 1);
+    assert.equal(r.store.hasPendingAppAccessChanges(), true);
+    assert.equal(await r.store.applyAppAccessChangesAsync(), true);
+    assert.equal(r.vpnState.tunDestroyed, 1);
+    assert.equal(r.vpnState.tunCreates.length, 2);
+    assert.deepEqual(Array.from(r.vpnState.tunCreates[1].trustedApplications), ['com.example.browser']);
+    assert.equal(r.store.hasPendingAppAccessChanges(), false);
+    assert.equal(r.store.chainConnected, true);
+    assert.deepEqual(Array.from(r.store.connectedChainNames), ['入口, A', '出口 B']);
+    assert.ok(r.disk.get('/sandbox/config.yaml').includes('dialer-proxy: "入口, A"'));
+    assert.equal(await r.store.applyAppAccessChangesAsync(), true);
+    assert.equal(r.vpnState.tunCreates.length, 2);
+    // Disabling must recreate an unrestricted connection without losing the saved list.
+    r.store.setAppAccessEnabled(false);
+    assert.equal(await r.store.applyAppAccessChangesAsync(), true);
+    assert.equal(r.vpnState.tunCreates[2].trustedApplications, undefined);
+    assert.equal(r.vpnState.tunCreates[2].blockedApplications, undefined);
+    assert.equal(r.store.appAccessList.length, 1);
+    await r.store.toggleRunningAsync();
+  } finally { r.dispose(); }
+});
+
+test('TUN: persists stack and MTU, rejects invalid drafts and upgrades older state', () => {
+  const r = runtime();
+  try {
+    for (const [stack, mtu] of [['invalid', 1400], ['system', 1279], ['system', 9001], ['mixed', 1400.5]]) {
+      assert.notEqual(r.store.setTunSettings(stack, mtu), '');
+    }
+    assert.equal(r.store.tunStack, 'system'); assert.equal(r.store.tunMtu, 1400);
+    assert.equal(r.store.setTunSettings('mixed', 1500), '');
+    r.store.persistState();
+    r.store.tunStack = 'system'; r.store.tunMtu = 1400;
+    r.store.initialize('/sandbox');
+    assert.equal(r.store.tunStack, 'mixed'); assert.equal(r.store.tunMtu, 1500);
+    const saved = JSON.parse(r.disk.get('/sandbox/lexiclash-state.json'));
+    delete saved.tunSettings;
+    r.disk.set('/sandbox/lexiclash-state.json', JSON.stringify(saved));
+    r.store.initialize('/sandbox');
+    assert.equal(r.store.tunStack, 'system'); assert.equal(r.store.tunMtu, 1400);
+  } finally { r.dispose(); }
+});
+
+test('TUN: both stack and MTU travel in the session, with MTU applied to the system interface', async () => {
+  for (const stack of ['system', 'gvisor', 'mixed']) {
+    const r = runtime({ loaded: true });
+    let extension;
+    try {
+      const tun = { stack, mtu: 1500 };
+      r.store.vpnManager.prepareStartFiles(fixture, {}, r.AppAccessControl.unrestricted(), tun);
+      assert.deepEqual(JSON.parse(r.disk.get('/sandbox/vpn-command.json')).tun, tun);
+      extension = new r.LexiVpnExtension(); extension.onCreate(); await extension.startup;
+      assert.equal(r.vpnState.tunCreates.length, 1);
+      assert.equal(r.vpnState.tunCreates[0].mtu, 1500);
+      assert.deepEqual(JSON.parse(r.disk.get('/sandbox/vpn-status.json')).tun, tun);
+      assert.equal(r.vpnState.tunCreates[0].isIPv4Accepted, true);
+      assert.equal(r.vpnState.tunCreates[0].isIPv6Accepted, true);
+    } finally {
+      if (extension) { extension.onDestroy(); await extension.stopping; }
+      r.dispose();
+    }
+  }
+});
+
+test('TUN: invalid settings never release the old session or create a system interface', async () => {
+  const r = runtime({ loaded: true });
+  try {
+    const command = { sessionId: 'current', action: 'start', secret: 'test', tun: { stack: 'system', mtu: 1000 } };
+    r.disk.set('/sandbox/vpn-command.json', JSON.stringify(command));
+    await assert.rejects(r.store.vpnManager.startVpn(fixture, {}, r.AppAccessControl.unrestricted(), command.tun), /MTU/);
+    assert.equal(r.vpnState.stopCalls.length, 0);
+    const extension = new r.LexiVpnExtension(); extension.onCreate(); await extension.startup;
+    assert.equal(r.vpnState.nativeLaunchCalls.length, 0);
+    assert.equal(r.vpnState.tunCreates.length, 0);
+  } finally { r.dispose(); }
+});
+
+test('TUN: mode preference is separate from connection and live mode changes preserve app routing and chain', async () => {
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); },
+    httpHandler: () => ({ responseCode: 200, result: JSON.stringify({ version: 'test', mode: 'rule', now: '出口 B', uploadTotal: 0, downloadTotal: 0, connections: [] }) })
+  } });
+  try {
+    assert.equal(await r.store.setTunModeEnabledAsync(true), true);
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.vpnEnabled, false);
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.store.addAppAccessEntry('com.example.browser', 'Browser');
+    r.store.setAppAccessEnabled(true); r.store.setAppAccessMode('whitelist');
+    pair(r); r.store.chainConnected = true; r.store.connectedChainNames = ['入口, A', '出口 B'];
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.tunCreates.length, 1);
+    assert.equal(await r.store.setTunModeEnabledAsync(true), true);
+    assert.equal(r.vpnState.tunCreates.length, 1);
+    assert.equal(r.store.setTunSettings('gvisor', 1500), '');
+    assert.equal(r.store.hasPendingTunChanges(), true);
+    assert.equal(r.vpnState.tunCreates.length, 1);
+    assert.equal(await r.store.applyTunSettingsAsync(), true);
+    assert.equal(r.vpnState.tunDestroyed, 1);
+    assert.equal(r.vpnState.tunCreates.length, 2);
+    assert.equal(r.vpnState.tunCreates[1].mtu, 1500);
+    assert.deepEqual(Array.from(r.vpnState.tunCreates[1].trustedApplications), ['com.example.browser']);
+    assert.equal(JSON.parse(r.disk.get('/sandbox/vpn-command.json')).tun.stack, 'gvisor');
+    assert.equal(r.store.hasPendingTunChanges(), false);
+    assert.equal(r.store.chainConnected, true);
+    assert.ok(r.disk.get('/sandbox/config.yaml').includes('dialer-proxy: "入口, A"'));
+    assert.equal(await r.store.applyTunSettingsAsync(), true);
+    assert.equal(r.vpnState.tunCreates.length, 2);
+    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
+    assert.equal(r.store.vpnEnabled, false);
+    assert.equal(r.store.isRunning, true);
+    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
+    assert.equal(r.store.chainConnected, true);
+    assert.equal(r.vpnState.tunDestroyed, 2);
+    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
+    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
+    assert.equal(r.vpnState.tunDestroyed, 2);
+    await r.store.toggleRunningAsync();
+  } finally { r.dispose(); }
+});
+
+test('Local proxy: TUN off still connects without VPN authorization, persists the mode, and disconnects', async () => {
+  const r = await imported({ loaded: true });
+  try {
+    assert.equal(await r.store.setTunModeEnabledAsync(false), true);
+    r.store.accessControlEnabled = true; r.store.accessControlMode = 'whitelist'; // Doesn't restrict proxy-only mode.
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.store.isRunning, true);
+    assert.equal(r.store.vpnEnabled, false);
+    assert.equal(r.store.hasManagedRuntime(), true);
+    assert.equal(r.vpnState.proxyLaunchCalls.length, 1);
+    assert.equal(r.vpnState.startCalls.length, 0);
+    assert.equal(r.vpnState.observerCount, 0);
+    assert.equal(r.vpnState.tunCreates.length, 0);
+    assert.equal(r.controller.runtimeProxyPort, 7890);
+    assert.equal(r.controller.vpnTunnelActive, true); // Controller-based async probes in either mode.
+    assert.equal(JSON.parse(r.disk.get('/sandbox/lexiclash-state.json')).tunEnabled, false);
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.hasManagedRuntime(), false);
+    assert.equal(r.vpnState.nativeStopCalls, 1);
+    r.store.tunEnabled = true; r.store.initialize('/sandbox');
+    assert.equal(r.store.tunEnabled, false);
+  } finally { r.dispose(); }
+});
+
+test('Local proxy: native listener failure reports disconnected and never opens a VPN', async () => {
+  const r = await imported({ loaded: true, vpnHooks: { launchProxyAsync: async () => 'mixed port occupied' } });
+  try {
+    await r.store.setTunModeEnabledAsync(false);
+    assert.equal(await r.store.toggleRunningAsync(), false);
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.vpnEnabled, false);
+    assert.equal(r.vpnState.startCalls.length, 0);
+    assert.match(r.store.lastOperationError, /mixed port occupied/);
+  } finally { r.dispose(); }
+});
+
+test('Startup: a clean runtime skips dead-controller probes and slow notification setup', async () => {
+  const r = await imported({ loaded: true });
+  let finishNotification;
+  try {
+    await r.store.vpnManager.releaseVpn();
+    assert.equal(r.httpState.requests.length, 0);
+    assert.equal(r.vpnState.stopCalls.length, 0);
+    r.BackgroundKeepAlive.start = () => new Promise(resolve => { finishNotification = resolve; });
+    await r.store.setTunModeEnabledAsync(false);
+    assert.equal(await Promise.race([r.store.toggleRunningAsync(), new Promise(resolve => setTimeout(() => resolve('slow'), 200))]), true);
+    assert.equal(r.store.coreStatus, 'connected');
+    assert.equal(r.httpState.requests.some(req => req.url.endsWith('/configs') && req.options.method === 'PATCH'), false);
+    finishNotification();
+    await r.store.toggleRunningAsync();
+  } finally { if (finishNotification) finishNotification(); r.dispose(); }
+});
+
+for (const tunEnabled of [true, false]) {
+  test(`Chain: replace live nodes, retain old chain on failed selection, and retry without disconnect (TUN=${tunEnabled})`, async () => {
+    let extension;
+    let failSelection = false;
+    let groupState = { Proxy: '入口, A', GLOBAL: '出口 B' };
+    let reloads = [];
+    const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+      onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+      onStopAbility: () => { if (extension) extension.onDestroy(); },
+      httpHandler: (url, options) => {
+        if (url.includes('/configs?force=true')) {
+          const yaml = JSON.parse(options.extraData).payload;
+          reloads.push(yaml);
+          const policy = JSON.parse(yaml.split('\n').find(line => line.startsWith('lexiclash: ')).slice(11));
+          groupState = { ...groupState, ...policy.selections };
+          return { responseCode: 204, result: '' };
+        }
+        if (url.includes('/proxies/')) {
+          const group = decodeURIComponent(url.split('/proxies/')[1]);
+          if (options.method === 'PUT') {
+            const name = JSON.parse(options.extraData).name;
+            if (failSelection && group === 'Proxy' && name === 'C') return { responseCode: 503, result: '{"message":"selection temporarily unavailable"}' };
+            groupState[group] = name;
+            return { responseCode: 204, result: '' };
+          }
+          return { responseCode: 200, result: JSON.stringify({ now: groupState[group] }) };
+        }
+        if (url.endsWith('/cache/dns/flush')) return { responseCode: 404, result: '' }; // Cleanup is optional.
+        return { responseCode: 200, result: JSON.stringify({ version: 'test', mode: 'rule', uploadTotal: 0, downloadTotal: 0, connections: [] }) };
+      }
+    } });
+    try {
+      await r.store.addNewProfile('主配置', '', 'file', fixture);
+      await r.store.setTunModeEnabledAsync(tunEnabled);
+      pair(r);
+      assert.equal(await r.store.connectProxyChainAsync(), '');
+      const starts = r.vpnState.startCalls.length + r.vpnState.proxyLaunchCalls.length;
+      // Change a running chain's exit and make the confirmation fail once.
+      r.store.removeProxyChainNode('出口 B'); r.store.addProxyChainNode('C');
+      const previousYaml = r.disk.get('/sandbox/config.yaml');
+      failSelection = true;
+      assert.match(await r.store.connectProxyChainAsync(), /selection temporarily unavailable/);
+      assert.equal(r.store.isRunning, true);
+      assert.equal(r.store.chainConnected, true);
+      assert.deepEqual(Array.from(r.store.connectedChainNames), ['入口, A', '出口 B']);
+      assert.equal(r.disk.get('/sandbox/config.yaml'), previousYaml);
+      assert.equal(reloads.at(-1), previousYaml);
+      failSelection = false;
+      assert.equal(await r.store.connectProxyChainAsync(), '');
+      assert.deepEqual(Array.from(r.store.connectedChainNames), ['入口, A', 'C']);
+      assert.equal(r.store.isProxyChainDraftApplied(), true);
+      assert.equal(r.vpnState.startCalls.length + r.vpnState.proxyLaunchCalls.length, starts);
+      assert.equal(r.vpnState.tunDestroyed, 0);
+      assert.equal(groupState.Proxy, 'C');
+      await r.store.toggleRunningAsync();
+    } finally { r.dispose(); }
+  });
+}
 
 (async () => {
   let failed = 0;

@@ -1,6 +1,7 @@
 // BackgroundKeepAlive.ets — HarmonyOS Continuous Task Keep-Alive for Persistent VPN
 import { common, wantAgent, WantAgent } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
 
@@ -9,26 +10,29 @@ const DOMAIN = 0xF1C1;
 export class BackgroundKeepAlive {
   private static abilityContext: common.UIAbilityContext | null = null;
   private static active: boolean = false;
-  private static starting: boolean = false;
+  private static pending: Promise<void> = Promise.resolve();
+  private static generation: number = 0;
   private static continuousTaskId: number = -1;
   private static refreshTimerId: number = -1;
   private static cancelListening: boolean = false;
-  private static bundleName: string = 'com.lovexjy.lexiclash';
-  private static abilityName: string = 'EntryAbility';
   private static lastStatus: string = 'idle';
 
   private static cancelListener: (info: backgroundTaskManager.ContinuousTaskCancelInfo) => void =
     (info: backgroundTaskManager.ContinuousTaskCancelInfo): void => {
+      if (info.id !== BackgroundKeepAlive.continuousTaskId) { return; }
+      BackgroundKeepAlive.clearRefreshTimer();
       BackgroundKeepAlive.active = false;
       BackgroundKeepAlive.continuousTaskId = -1;
       BackgroundKeepAlive.lastStatus = `canceled:${info.reason}`;
-      RuntimeDiagnostics.record(`Continuous task canceled by OS reason=${info.reason} id=${info.id}`);
+      RuntimeDiagnostics.record(`Continuous task canceled by OS reason=${info.reason} detailedReason=${info.detailedReason} id=${info.id}`);
     };
 
   static setAbilityContext(context: common.UIAbilityContext | null): void {
     BackgroundKeepAlive.abilityContext = context;
     if (context === null) {
       BackgroundKeepAlive.clearRefreshTimer();
+      BackgroundKeepAlive.active = false;
+      BackgroundKeepAlive.continuousTaskId = -1;
     }
   }
 
@@ -41,41 +45,43 @@ export class BackgroundKeepAlive {
   }
 
   private static clearRefreshTimer(): void {
+    BackgroundKeepAlive.generation++;
     if (BackgroundKeepAlive.refreshTimerId !== -1) {
       clearInterval(BackgroundKeepAlive.refreshTimerId);
       BackgroundKeepAlive.refreshTimerId = -1;
     }
   }
 
-  private static scheduleKeepAliveRefresh(): void {
+  private static scheduleProgress(notificationId: number, readBytes: () => Promise<number>): void {
     BackgroundKeepAlive.clearRefreshTimer();
-    // Periodically verify/re-acquire DATA_TRANSFER continuous task under the 10-minute idle threshold.
-    BackgroundKeepAlive.refreshTimerId = setInterval((): void => {
-      if (BackgroundKeepAlive.abilityContext === null) {
-        BackgroundKeepAlive.clearRefreshTimer();
-        return;
+    const generation = BackgroundKeepAlive.generation;
+    let updating = false;
+    const publish = async (): Promise<void> => {
+      if (updating || generation !== BackgroundKeepAlive.generation) { return; }
+      updating = true;
+      try {
+        const bytes = await readBytes();
+        if (generation !== BackgroundKeepAlive.generation || !Number.isFinite(bytes) || bytes < 0) { return; }
+        const transferred = `已传输 ${(bytes / 1048576).toFixed(2)} MiB`;
+        await notificationManager.publish({
+          id: notificationId,
+          notificationSlotType: notificationManager.SlotType.LIVE_VIEW,
+          content: {
+            notificationContentType: notificationManager.ContentType.NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW,
+            systemLiveView: {
+              typeCode: 8, title: 'LexiClash VPN', text: transferred,
+              progress: { currentValue: Math.floor(bytes / 1024), isPercentage: false }
+            }
+          }
+        });
+      } catch (err) {
+        RuntimeDiagnostics.record(`VPN transfer notification update failed: ${String(err)}`);
+      } finally {
+        updating = false;
       }
-      BackgroundKeepAlive.verifyAndRenewAsync();
-    }, 8 * 60 * 1000);
-  }
-
-  private static async verifyAndRenewAsync(): Promise<void> {
-    const ctx: common.UIAbilityContext | null = BackgroundKeepAlive.abilityContext;
-    if (ctx === null) {
-      return;
-    }
-    try {
-      const list: backgroundTaskManager.ContinuousTaskInfo[] =
-        await backgroundTaskManager.getAllContinuousTasks(ctx);
-      if (Array.isArray(list) && list.length > 0) {
-        BackgroundKeepAlive.active = true;
-        return;
-      }
-    } catch (_err) {
-      // Fallback to direct re-request below.
-    }
-    BackgroundKeepAlive.active = false;
-    await BackgroundKeepAlive.start(BackgroundKeepAlive.bundleName, BackgroundKeepAlive.abilityName);
+    };
+    publish();
+    BackgroundKeepAlive.refreshTimerId = setInterval((): void => { publish(); }, 2 * 60 * 1000);
   }
 
   private static async buildLaunchAgent(bundleName: string, abilityName: string): Promise<WantAgent> {
@@ -88,14 +94,15 @@ export class BackgroundKeepAlive {
     return await wantAgent.getWantAgent(info);
   }
 
-  static async start(bundleName: string = 'com.lovexjy.lexiclash', abilityName: string = 'EntryAbility'): Promise<void> {
-    BackgroundKeepAlive.bundleName = bundleName;
-    BackgroundKeepAlive.abilityName = abilityName;
-    const ctx: common.UIAbilityContext | null = BackgroundKeepAlive.abilityContext;
-    if (ctx === null || BackgroundKeepAlive.active || BackgroundKeepAlive.starting) {
-      return;
-    }
-    BackgroundKeepAlive.starting = true;
+  static start(bundleName: string, abilityName: string, readBytes: () => Promise<number>): Promise<void> {
+    BackgroundKeepAlive.pending = BackgroundKeepAlive.pending.then(() =>
+      BackgroundKeepAlive.startTask(bundleName, abilityName, readBytes));
+    return BackgroundKeepAlive.pending;
+  }
+
+  private static async startTask(bundleName: string, abilityName: string, readBytes: () => Promise<number>): Promise<void> {
+    const ctx = BackgroundKeepAlive.abilityContext;
+    if (ctx === null || BackgroundKeepAlive.active) { return; }
     try {
       if (!BackgroundKeepAlive.cancelListening) {
         try {
@@ -127,30 +134,39 @@ export class BackgroundKeepAlive {
       }
 
       if (!usedTaskKeeping) {
-        await backgroundTaskManager.startBackgroundRunning(
-          ctx,
-          backgroundTaskManager.BackgroundMode.DATA_TRANSFER,
-          agent
-        );
-        BackgroundKeepAlive.continuousTaskId = 0;
+        const request = new backgroundTaskManager.ContinuousTaskRequest();
+        request.backgroundTaskModes = [backgroundTaskManager.BackgroundTaskMode.MODE_DATA_TRANSFER];
+        request.backgroundTaskSubmodes = [backgroundTaskManager.BackgroundTaskSubmode.SUBMODE_LIVE_VIEW_NOTIFICATION];
+        request.wantAgent = agent;
+        const task = await backgroundTaskManager.startBackgroundRunning(ctx, request);
+        BackgroundKeepAlive.continuousTaskId = task.continuousTaskId ?? -1;
+        if (ctx === BackgroundKeepAlive.abilityContext) {
+          BackgroundKeepAlive.scheduleProgress(task.notificationId, readBytes);
+        }
         BackgroundKeepAlive.lastStatus = 'running:dataTransfer';
         hilog.info(DOMAIN, 'LexiKeepAlive', 'Started DATA_TRANSFER continuous background task');
       }
 
+      if (ctx !== BackgroundKeepAlive.abilityContext) {
+        await backgroundTaskManager.stopBackgroundRunning(ctx);
+        return;
+      }
       BackgroundKeepAlive.active = true;
-      BackgroundKeepAlive.scheduleKeepAliveRefresh();
       RuntimeDiagnostics.record(`KeepAlive started (${BackgroundKeepAlive.lastStatus})`);
     } catch (err) {
       BackgroundKeepAlive.active = false;
       BackgroundKeepAlive.lastStatus = `error:${String(err)}`;
       hilog.warn(DOMAIN, 'LexiKeepAlive', 'Continuous task unavailable: %{public}s', String(err));
       RuntimeDiagnostics.record(`KeepAlive start failed: ${String(err)}`);
-    } finally {
-      BackgroundKeepAlive.starting = false;
     }
   }
 
-  static async stop(): Promise<void> {
+  static stop(): Promise<void> {
+    BackgroundKeepAlive.pending = BackgroundKeepAlive.pending.then(() => BackgroundKeepAlive.stopTask());
+    return BackgroundKeepAlive.pending;
+  }
+
+  private static async stopTask(): Promise<void> {
     BackgroundKeepAlive.clearRefreshTimer();
     const ctx: common.UIAbilityContext | null = BackgroundKeepAlive.abilityContext;
     const wasActive: boolean = BackgroundKeepAlive.active;

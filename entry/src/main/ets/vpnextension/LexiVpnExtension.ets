@@ -3,7 +3,10 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { launchAsync, startTunAsync, getTunError, stopAsync } from 'libclash_bridge.so';
+import { VpnRuntimeManager } from '../core/VpnRuntimeManager';
 import { RuntimeDiagnostics } from '../core/RuntimeDiagnostics';
+import { AppAccessControl, LexiAppAccessPolicy } from '../core/AppAccessControl';
+import { LexiTunSettings, TunConfig } from '../core/TunConfig';
 
 const DOMAIN: number = 0xF1C1;
 
@@ -12,6 +15,8 @@ interface VpnCommand {
   action: string;
   requestedAt: number;
   secret: string;
+  accessControl?: LexiAppAccessPolicy;
+  tun?: LexiTunSettings;
 }
 
 interface VpnRuntimeStatus {
@@ -20,6 +25,9 @@ interface VpnRuntimeStatus {
   error: string;
   updatedAt: number;
   cleanupComplete: boolean;
+  accessControl: LexiAppAccessPolicy;
+  tun: LexiTunSettings;
+  tunEnabled: boolean;
 }
 
 interface VpnSession {
@@ -42,7 +50,11 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
   private coreStopping?: Promise<void>;
   private cleanup?: Promise<void>;
   private commandTimer: number = -1;
+  private networkManager: VpnRuntimeManager = new VpnRuntimeManager();
+  private networkTimer: number = -1;
   private lastHeartbeat: number = 0;
+  private accessControl: LexiAppAccessPolicy = AppAccessControl.unrestricted();
+  private tunSettings: LexiTunSettings = TunConfig.defaults();
 
   onCreate(): void {
     RuntimeDiagnostics.watch();
@@ -54,6 +66,8 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       return;
     }
     this.sessionId = command.sessionId;
+    this.accessControl = command.accessControl ?? AppAccessControl.unrestricted();
+    this.tunSettings = command.tun ?? TunConfig.defaults();
     if (command.action !== 'start') {
       this.cleaned = true;
       this.publishStatus('stopped');
@@ -97,7 +111,10 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       status: status,
       error: error,
       updatedAt: Date.now(),
-      cleanupComplete: this.cleaned
+      cleanupComplete: this.cleaned,
+      accessControl: this.accessControl,
+      tun: this.tunSettings,
+      tunEnabled: true
     };
     try {
       this.writeJson('vpn-status.json', JSON.stringify(data));
@@ -131,6 +148,10 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
     try {
       this.checkStartAllowed();
       if (!secret) { throw new Error('VPN 会话凭据缺失，请重新连接'); }
+      const accessError: string = AppAccessControl.validationError(this.accessControl);
+      if (accessError.length > 0) { throw new Error(accessError); }
+      const tunError: string = TunConfig.validationError(this.tunSettings);
+      if (tunError.length > 0) { throw new Error(tunError); }
       // Launch mihomo core & REST controller before routing system traffic into TUN.
       this.coreAttempted = true;
       const launchError: string = await launchAsync(this.context.filesDir, secret);
@@ -151,13 +172,22 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
         isDefaultRoute: true
       };
       const config: vpnExtension.VpnConfig = {
-        addresses: [address],
-        routes: [route],
+        addresses: [address, {
+          address: { address: 'fdfe:dcba:9876::1', family: 2 }, prefixLength: 126
+        }],
+        routes: [route, {
+          interface: 'vpn-tun',
+          destination: { address: { address: '::', family: 2 }, prefixLength: 0 },
+          gateway: { address: 'fdfe:dcba:9876::1', family: 2 },
+          hasGateway: false, isDefaultRoute: true
+        }],
         dnsAddresses: ['172.19.0.2'],
-        mtu: 1400,
+        mtu: this.tunSettings.mtu,
         isIPv4Accepted: true,
-        isIPv6Accepted: false
+        // Always capture IPv6. The core rejects it when the user disables IPv6.
+        isIPv6Accepted: true
       };
+      AppAccessControl.configureVpn(config, this.accessControl);
       this.pendingFd = await this.connection.create(config);
       this.connectionCreated = true;
       hilog.info(DOMAIN, 'LexiClashVPN', 'VPN TUN created');
@@ -172,6 +202,11 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       }
       const session: VpnSession = { sessionId: this.sessionId, startedAt: Date.now() };
       this.writeJson('vpn-session.json', JSON.stringify(session));
+      this.networkManager.setFilesDir(this.context.filesDir);
+      this.networkManager.startNetworkWatch((_changed: boolean, netId: number): void => {
+        clearTimeout(this.networkTimer);
+        this.networkTimer = setTimeout((): void => { this.refreshUpstream(netId); }, 1500);
+      });
       this.publishStatus('running');
       hilog.info(DOMAIN, 'LexiClashVPN', 'Native TUN started');
       return;
@@ -191,6 +226,20 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
     }
     this.clearCommandTimer();
     this.publishStatus(failure ? 'error' : 'stopped', failure);
+  }
+
+  private async refreshUpstream(netId: number): Promise<void> {
+    this.networkTimer = -1;
+    if (this.cancelled || !this.ownsSession()) { return; }
+    try {
+      await this.networkManager.flushDnsCache();
+      if (this.cancelled || !this.ownsSession()) { return; }
+      // New sockets select the current physical network in socket_ohos.go.
+      await this.networkManager.closeAllConnections();
+      RuntimeDiagnostics.record(`VPN upstream connections refreshed netId=${netId}`);
+    } catch (err) {
+      RuntimeDiagnostics.record(`VPN upstream refresh failed: ${String(err)}`);
+    }
   }
 
   private stopCore(): Promise<void> {
@@ -246,6 +295,8 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
   private requestStop(): void {
     if (this.stopping) { return; }
     this.cancelled = true;
+    this.networkManager.stopNetworkWatch();
+    clearTimeout(this.networkTimer);
     this.publishStatus('stopping');
     this.stopCore();
     this.stopping = this.finishStop();

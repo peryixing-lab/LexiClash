@@ -585,7 +585,9 @@ export struct DnsQueriesMonitorPage {
       if (this.getDnsList().length === 0) {
         MonitorEmptyView({
           palette: this.palette,
-          labelText: this.store.localeLang === 'en_US' ? 'No DNS queries' : '暂无 DNS 查询'
+          labelText: this.store.localeLang === 'en_US'
+            ? 'DNS query logging is not connected. This page cannot verify DNS leaks.'
+            : '暂未接入真实 DNS 查询日志，此页无法判断 DNS 是否泄露。'
         })
       } else {
         Scroll() {

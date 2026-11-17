@@ -13,3 +13,5 @@
 工具链不提交；仓库同时提供 ARM64 共享库和配套 C 头文件，便于克隆后直接使用 DevEco Studio 构建。需要重新编译时请参照 `docs/build-native.md`，预编译文件校验值见 `native/PREBUILT.md`。构建启用 `-trimpath`，避免将本机源码绝对路径写入新生成的 Go 二进制。
 
 为避免发布固定私钥，`Clash.Meta/transport/openvpn/config_test.go` 的静态证书和 EC 私钥改为测试启动时在内存中生成临时证书与密钥；不写入文件、不改变生产协议实现。
+
+网络隐私适配：新增 `Clash.Meta/config/lexiclash.go` 与 `Clash.Meta/tunnel/privacy.go`，在配置编译与 executor 应用时合并设置及隐私规则；调整 DNS 出站校验、UDP 失败处理和双栈 TUN。相关回归覆盖 config、tunnel、sing_tun 和包装层 socket 策略。行为及真机验收见 [网络隐私说明](../docs/privacy.md)。

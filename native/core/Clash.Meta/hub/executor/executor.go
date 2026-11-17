@@ -99,6 +99,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateUsers(cfg.Users)
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
+	tunnel.UpdatePrivacyPolicy(cfg.Privacy)
 	updateSniffer(cfg.Sniffer)
 	updateHosts(cfg.Hosts)
 	updateGeneral(cfg.General, true)
@@ -114,8 +115,8 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	initInnerTcp()
 	loadProvider(cfg.Providers)
 	updateProfile(cfg)
+	config.ApplyLexiClashSelections(cfg)
 	loadProvider(cfg.RuleProviders)
-	runtime.GC()
 	tunnel.OnRunning()
 	updateUpdater(cfg)
 

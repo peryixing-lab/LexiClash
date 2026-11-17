@@ -78,6 +78,9 @@ func (d *DNSDialer) DialContext(ctx context.Context, network, addr string) (net.
 		}
 	}
 
+	if (proxyAdapter != nil || proxyName != "") && privacyRejectsDNSProxy(proxyAdapter, metadata) {
+		return nil, fmt.Errorf("privacy policy blocks direct DNS egress")
+	}
 	if metadata.NetWork == C.TCP {
 		if proxyAdapter == nil {
 			opts = append(opts, dialer.WithResolver(r))
@@ -168,6 +171,9 @@ func (d *DNSDialer) ListenPacket(ctx context.Context, network, addr string) (net
 		}
 	}
 
+	if (proxyAdapter != nil || proxyName != "") && privacyRejectsDNSProxy(proxyAdapter, metadata) {
+		return nil, fmt.Errorf("privacy policy blocks direct DNS egress")
+	}
 	if proxyAdapter == nil {
 		return dialer.NewDialer(opts...).ListenPacket(ctx, network, "", metadata.AddrPort())
 	}

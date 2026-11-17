@@ -658,9 +658,7 @@ func withSetupConfig(t *testing.T, apply func(*SetupParams) error) {
 	})
 }
 
-// applyConfig rolls back to the default config when the profile fails to parse.
-// That rollback is the whole recovery: the error reaches the host and the
-// listeners keep serving while the user picks another profile.
+// A rejected profile preserves the last valid configuration and its listeners.
 func TestHandleSetupConfigKeepsTheListenerWhenTheProfileFails(t *testing.T) {
 	withSetupConfig(t, func(*SetupParams) error { return errors.New("bad profile") })
 

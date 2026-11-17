@@ -82,6 +82,7 @@ type ProxiesData struct {
 }
 
 const (
+	privacyCapabilitiesMethod      CoreMethod = "privacy.capabilities"
 	messageMethod                  CoreMethod = "message"
 	initClashMethod                CoreMethod = "initClash"
 	getIsInitMethod                CoreMethod = "getIsInit"

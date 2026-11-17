@@ -4,12 +4,18 @@ import { fileIo as fs } from '@kit.CoreFileKit';
 import { BackgroundKeepAlive } from './BackgroundKeepAlive';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
 import { VpnAuthorization } from './VpnAuthorization';
+import { AppAccessControl, LexiAppAccessPolicy } from './AppAccessControl';
+import { LexiTunSettings, TunConfig } from './TunConfig';
+import { launchProxyAsync, stopAsync } from 'libclash_bridge.so';
 
 export interface LexiVpnCommand {
   sessionId: string;
   action: string;
   requestedAt: number;
   secret: string;
+  accessControl?: LexiAppAccessPolicy;
+  tun?: LexiTunSettings;
+  tunEnabled?: boolean;
 }
 
 export interface LexiVpnRuntimeStatus {
@@ -18,6 +24,9 @@ export interface LexiVpnRuntimeStatus {
   error: string;
   updatedAt: number;
   cleanupComplete: boolean;
+  accessControl?: LexiAppAccessPolicy;
+  tun?: LexiTunSettings;
+  tunEnabled?: boolean;
 }
 
 export interface LexiControllerTraffic {
@@ -36,6 +45,9 @@ export class VpnRuntimeManager {
   private netConn: connection.NetConnection | null = null;
   private lastPhysicalNetId: number = 0;
   private netLostObserved: boolean = false;
+  private configQueue: Promise<void> = Promise.resolve<void>(undefined);
+  private localStatus: LexiVpnRuntimeStatus | null = null;
+  private localStartedAt: number = 0;
 
   setFilesDir(filesDir: string): void {
     this.filesDir = filesDir;
@@ -98,6 +110,7 @@ export class VpnRuntimeManager {
   }
 
   getRuntimeStatus(): LexiVpnRuntimeStatus {
+    if (this.localStatus !== null) { return this.localStatus; }
     if (this.filesDir.length === 0) {
       return { sessionId: '', status: 'stopped', error: '', updatedAt: 0, cleanupComplete: true };
     }
@@ -114,6 +127,7 @@ export class VpnRuntimeManager {
   }
 
   getSessionStartedAt(): number {
+    if (this.localStatus !== null) { return this.localStartedAt; }
     if (this.filesDir.length === 0) {
       return 0;
     }
@@ -159,6 +173,9 @@ export class VpnRuntimeManager {
 
   async releaseVpn(): Promise<void> {
     const initial: LexiVpnRuntimeStatus = this.getRuntimeStatus();
+    // A clean or never-started session owns no TUN or controller. Probing a
+    // closed loopback port on every connect adds a full HTTP timeout on device.
+    if (initial.cleanupComplete && (initial.status === 'stopped' || initial.status === 'error')) { return; }
     const sessionId: string = this.requestVpnStop();
     let abilityStopped: boolean = false;
     if (!this.runtimeIsFresh(initial) || initial.cleanupComplete) {
@@ -206,7 +223,13 @@ export class VpnRuntimeManager {
     throw new Error('上次 VPN 尚未释放，请稍后重试');
   }
 
-  prepareStartFiles(yamlContent: string, selectionsMap: Record<string, string>): string {
+  prepareStartFiles(yamlContent: string, selectionsMap: Record<string, string>,
+    accessControl: LexiAppAccessPolicy = AppAccessControl.unrestricted(),
+    tun: LexiTunSettings = TunConfig.defaults(), tunEnabled: boolean = true): string {
+    const accessError: string = tunEnabled ? AppAccessControl.validationError(accessControl) : '';
+    if (accessError.length > 0) { throw new Error(accessError); }
+    const tunError: string = TunConfig.validationError(tun);
+    if (tunError.length > 0) { throw new Error(tunError); }
     if (this.secretValue.length === 0) {
       this.secretValue = this.generateRandomToken();
     }
@@ -215,17 +238,27 @@ export class VpnRuntimeManager {
     const sessionId: string = this.generateRandomToken();
     const cmd: LexiVpnCommand = {
       sessionId: sessionId,
-      action: 'start',
+      action: tunEnabled ? 'start' : 'proxy',
       requestedAt: Date.now(),
-      secret: this.secretValue
+      secret: this.secretValue,
+      accessControl: accessControl,
+      tun: tun,
+      tunEnabled: tunEnabled
     };
     this.writePrivateFile('vpn-command.json', JSON.stringify(cmd));
     return sessionId;
   }
 
-  async startVpn(yamlContent: string, selectionsMap: Record<string, string>): Promise<void> {
+  async startVpn(yamlContent: string, selectionsMap: Record<string, string>,
+    accessControl: LexiAppAccessPolicy = AppAccessControl.unrestricted(),
+    tun: LexiTunSettings = TunConfig.defaults()): Promise<void> {
+    const accessError: string = AppAccessControl.validationError(accessControl);
+    if (accessError.length > 0) { throw new Error(accessError); }
+    const tunError: string = TunConfig.validationError(tun);
+    if (tunError.length > 0) { throw new Error(tunError); }
+    await this.stopLocalProxy();
     await this.releaseVpn();
-    const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap);
+    const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap, accessControl, tun);
     let denied: boolean = false;
     let rejectAuthorization: ((reason: Error) => void) | undefined = undefined;
     const authorizationDenied: Promise<void> = new Promise<void>(
@@ -283,8 +316,9 @@ export class VpnRuntimeManager {
       if (!ready) {
         throw new Error('VPN 扩展进程未响应启动，请确认设备支持系统 VPN 扩展后重试');
       }
-      await this.checkController();
-      await BackgroundKeepAlive.start(VpnRuntimeManager.BUNDLE_NAME, 'EntryAbility');
+      // The native launch and extension already confirmed controller and TUN
+      // readiness. Notification setup is independent of connection readiness.
+      this.startKeepAlive().catch((error: Error): void => { RuntimeDiagnostics.record(String(error)); });
     } catch (error) {
       try {
         await this.releaseVpn();
@@ -292,7 +326,8 @@ export class VpnRuntimeManager {
         // ignore secondary cleanup error
       }
       if (error instanceof Error) {
-        throw error;
+        if (error instanceof Error) { throw error; }
+      throw new Error(String(error));
       }
       throw new Error(String(error));
     } finally {
@@ -300,10 +335,44 @@ export class VpnRuntimeManager {
     }
   }
 
-  async stopVpn(): Promise<void> {
-    this.stopNetworkWatch();
+  private startKeepAlive(): Promise<void> {
+    return BackgroundKeepAlive.start(VpnRuntimeManager.BUNDLE_NAME, 'EntryAbility', async (): Promise<number> => {
+      const snapshot = await this.getConnectionsSnapshot();
+      return snapshot.uploadTotal + snapshot.downloadTotal;
+    });
+  }
+
+  async startProxy(yamlContent: string, selectionsMap: Record<string, string>): Promise<void> {
+    await this.stopLocalProxy();
+    await this.releaseVpn();
+    const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap,
+      AppAccessControl.unrestricted(), TunConfig.defaults(), false);
     try {
-      await this.releaseVpn();
+      const error: string = await launchProxyAsync(this.filesDir, this.secretValue);
+      if (error.length > 0) { throw new Error(error); }
+      this.localStartedAt = Date.now();
+      this.localStatus = { sessionId: sessionId, status: 'running', error: '', updatedAt: Date.now(),
+        cleanupComplete: false, tunEnabled: false };
+      this.startKeepAlive().catch((error: Error): void => { RuntimeDiagnostics.record(String(error)); });
+    } catch (error) {
+      await stopAsync();
+      this.localStatus = null;
+      if (error instanceof Error) { throw error; }
+      throw new Error(String(error));
+    }
+  }
+
+  private async stopLocalProxy(): Promise<void> {
+    if (this.localStatus === null) { return; }
+    await stopAsync();
+    this.localStatus = null;
+    this.localStartedAt = 0;
+  }
+
+  async stopVpn(): Promise<void> {
+    try {
+      if (this.localStatus !== null) { await this.stopLocalProxy(); }
+      else { await this.releaseVpn(); }
     } finally {
       await BackgroundKeepAlive.stop();
     }
@@ -316,7 +385,7 @@ export class VpnRuntimeManager {
     }
     try {
       await this.checkController();
-      await BackgroundKeepAlive.start(VpnRuntimeManager.BUNDLE_NAME, 'EntryAbility');
+      await this.startKeepAlive();
       return true;
     } catch (_err) {
       return false;
@@ -325,25 +394,25 @@ export class VpnRuntimeManager {
 
   startNetworkWatch(onNetworkRecover: (netIdChanged: boolean, netId: number) => void): void {
     this.stopNetworkWatch();
-    try {
-      if (typeof connection?.getDefaultNetSync === 'function') {
-        const initial: connection.NetHandle = connection.getDefaultNetSync();
-        this.lastPhysicalNetId = Number(initial?.netId ?? 0);
-      }
-    } catch (_err) {
-      this.lastPhysicalNetId = 0;
-    }
+    this.lastPhysicalNetId = 0;
     try {
       if (typeof connection?.createNetConnection !== 'function') {
         return;
       }
-      const conn: connection.NetConnection = connection.createNetConnection();
+      const conn: connection.NetConnection = connection.createNetConnection({
+        netCapabilities: {
+          bearerTypes: [],
+          networkCap: [connection.NetCap.NET_CAPABILITY_INTERNET, connection.NetCap.NET_CAPABILITY_NOT_VPN]
+        }
+      });
       this.netConn = conn;
-      conn.on('netLost', (_handle: connection.NetHandle): void => {
+      conn.on('netLost', (handle: connection.NetHandle): void => {
+        if (conn !== this.netConn || handle.netId !== this.lastPhysicalNetId) { return; }
         this.netLostObserved = true;
         RuntimeDiagnostics.record('Physical network lost while VPN active');
       });
       conn.on('netAvailable', (handle: connection.NetHandle): void => {
+        if (conn !== this.netConn) { return; }
         const nextId: number = Number(handle?.netId ?? 0);
         if (nextId <= 0) {
           return;
@@ -379,8 +448,7 @@ export class VpnRuntimeManager {
     this.netLostObserved = false;
   }
 
-  stopKeepAliveAndNetworkWatch(): void {
-    this.stopNetworkWatch();
+  stopKeepAlive(): void {
     BackgroundKeepAlive.stop();
   }
 
@@ -407,7 +475,12 @@ export class VpnRuntimeManager {
         expectDataType: http.HttpDataType.STRING
       });
       if (result.responseCode < 200 || result.responseCode >= 300) {
-        throw new Error(`控制器返回 HTTP ${result.responseCode}`);
+        let detail: string = '';
+        try {
+          const reply: Record<string, Object> = JSON.parse(String(result.result ?? '')) as Record<string, Object>;
+          detail = typeof reply['message'] === 'string' ? String(reply['message']).slice(0, 300) : '';
+        } catch (_parseError) { /* Non-JSON error responses contain no useful API error. */ }
+        throw new Error(`控制器返回 HTTP ${result.responseCode}${detail.length > 0 ? '：' + detail : ''}`);
       }
       return result.result === undefined || result.result === null ? '' : String(result.result);
     } finally {
@@ -452,50 +525,86 @@ export class VpnRuntimeManager {
    * Reloads runtime YAML in-place via mihomo REST PUT /configs?force=true without
    * dropping the active VpnConnection TUN file descriptor, matching clash-verge-rev.
    */
-  async reloadRuntimeConfig(
+  reloadRuntimeConfig(
     yamlContent: string,
     selectionsMap: Record<string, string>,
     mode: string,
     targetGroup: string = '',
     targetProxy: string = ''
   ): Promise<void> {
+    const operation: Promise<void> = this.configQueue.then((): Promise<void> =>
+      this.applyRuntimeConfig(yamlContent, selectionsMap, mode, targetGroup, targetProxy));
+    this.configQueue = operation.catch((_error: Error): void => {});
+    return operation;
+  }
+
+  private async applyRuntimeConfig(
+    yamlContent: string,
+    selectionsMap: Record<string, string>,
+    mode: string,
+    targetGroup: string,
+    targetProxy: string
+  ): Promise<void> {
     if (this.filesDir.length === 0) {
       throw new Error('VPN 工作目录未初始化');
     }
-    this.writePrivateFile('proxy-selections.json', JSON.stringify(selectionsMap));
-    this.writePrivateFile('config.yaml', yamlContent);
-    await this.request(
-      '/configs?force=true',
-      http.RequestMethod.PUT,
-      JSON.stringify({ payload: yamlContent }),
-      10000
-    );
-    if (mode.length > 0) {
-      try {
-        await this.setMode(mode);
-      } catch (_modeErr) {
-        // Outbound mode is already encoded in the reloaded YAML payload.
-      }
-    }
-    const groupKeys: string[] = Object.keys(selectionsMap);
-    for (let i: number = 0; i < groupKeys.length; i++) {
-      const grp: string = groupKeys[i];
-      const pick: string = selectionsMap[grp];
-      if (pick.length > 0 && grp !== targetGroup) {
+    let previousYaml: string = '';
+    let previousSelections: string = '{}';
+    try { previousYaml = fs.readTextSync(`${this.filesDir}/config.yaml`) ?? ''; } catch (_missing) {}
+    try { previousSelections = fs.readTextSync(`${this.filesDir}/proxy-selections.json`) ?? '{}'; } catch (_missing) {}
+    let applied: boolean = false;
+    try {
+      await this.request(
+        '/configs?force=true',
+        http.RequestMethod.PUT,
+        JSON.stringify({ payload: yamlContent }),
+        30000
+      );
+      applied = true;
+      if (mode.length > 0) {
         try {
-          await this.selectProxy(grp, pick);
-        } catch (_selErr) {
-          // Non-Selector groups may ignore manual selection.
+          await this.setMode(mode);
+        } catch (_modeErr) {
+          // Outbound mode is already encoded in the reloaded YAML payload.
         }
       }
-    }
-    if (targetGroup.length > 0 && targetProxy.length > 0) {
-      await this.selectProxy(targetGroup, targetProxy);
-    }
-    try {
-      await this.closeAllConnections();
-    } catch (_closeErr) {
-      // Connections may already be closed.
+      const groupKeys: string[] = Object.keys(selectionsMap);
+      for (let i: number = 0; i < groupKeys.length; i++) {
+        const grp: string = groupKeys[i];
+        const pick: string = selectionsMap[grp];
+        if (pick.length > 0 && grp !== targetGroup) {
+          try {
+            await this.selectProxy(grp, pick);
+          } catch (_selErr) {
+            // Non-Selector groups may ignore manual selection.
+          }
+        }
+      }
+      if (targetGroup.length > 0 && targetProxy.length > 0) {
+        await this.selectProxy(targetGroup, targetProxy);
+      }
+      // A rejected policy must not replace the configuration used on restart.
+      this.writePrivateFile('proxy-selections.json', JSON.stringify(selectionsMap));
+      this.writePrivateFile('config.yaml', yamlContent);
+      try { await this.flushDnsCache(); } catch (_flushError) { /* Cleanup must not turn an applied config into a failed update. */ }
+      try {
+        await this.closeAllConnections();
+      } catch (_closeErr) {
+        // Connections may already be closed.
+      }
+    } catch (error) {
+      if (applied && previousYaml.length > 0) {
+        try {
+          await this.request('/configs?force=true', http.RequestMethod.PUT,
+            JSON.stringify({ payload: previousYaml }), 30000);
+          this.writePrivateFile('proxy-selections.json', previousSelections);
+          this.writePrivateFile('config.yaml', previousYaml);
+        } catch (rollbackError) {
+          throw new Error(`${String(error)}；恢复原配置失败：${String(rollbackError)}`);
+        }
+      }
+      if (error instanceof Error) { throw error; }
+      throw new Error(String(error));
     }
   }
 
@@ -542,11 +651,9 @@ export class VpnRuntimeManager {
   }
 
   async flushDnsCache(): Promise<void> {
-    try {
-      await this.request('/cache/fakeip/flush', http.RequestMethod.POST);
-    } catch (_err) {
-      // Ignore if core runs without fake-ip DNS cache
-    }
+    // Preserve fake-IP mappings held by running applications during a network
+    // change; only upstream resolver answers need to be refreshed.
+    await this.request('/cache/dns/flush', http.RequestMethod.POST);
   }
 
   async getLocalIntranetIp(): Promise<string> {

@@ -33,6 +33,7 @@ var ohosSecret atomic.Pointer[string]
 var ohosLifecycle coreLifecycle
 var ohosTun *sing_tun.Listener
 var ohosTunError atomic.Pointer[string]
+var ohosTunSettings = defaultTunRuntimeSettings()
 
 func main() {}
 
@@ -85,6 +86,18 @@ func FlClashLaunchAtEpoch(homeDir *C.char, secret *C.char, epoch C.ulonglong) *C
 }
 
 func launchOHOSCore(homeDir, secret string) error {
+	command, err := os.ReadFile(filepath.Join(homeDir, "vpn-command.json"))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read VPN session command: %w", err)
+	}
+	ohosTunSettings = defaultTunRuntimeSettings()
+	if err == nil {
+		settings, parseErr := parseTunRuntimeSettings(command)
+		if parseErr != nil {
+			return parseErr
+		}
+		ohosTunSettings = settings
+	}
 	resetPhysicalNetwork()
 	value := secret
 	ohosSecret.Store(&value)
@@ -124,6 +137,28 @@ func launchOHOSCore(homeDir, secret string) error {
 	return fmt.Errorf("external controller did not start within 3 seconds (GOOS=%s, addr=%q)", runtime.GOOS, address)
 }
 
+//export FlClashLaunchProxyAtEpoch
+func FlClashLaunchProxyAtEpoch(homeDir *C.char, secret *C.char, epoch C.ulonglong) *C.char {
+	err := ohosLifecycle.run(uint64(epoch), func() error {
+		if isInit.Load() {
+			return errors.New("native core is already initialized")
+		}
+		if err := launchOHOSCore(C.GoString(homeDir), C.GoString(secret)); err != nil {
+			stopOHOSCore()
+			return err
+		}
+		if err := startLocalProxyListeners(); err != nil {
+			stopOHOSCore()
+			return err
+		}
+		return nil
+	}, stopOHOSCore)
+	if err != nil {
+		return C.CString(err.Error())
+	}
+	return C.CString("")
+}
+
 //export FlClashStartTun
 func FlClashStartTun(fd C.int) C.int {
 	return FlClashStartTunAtEpoch(fd, C.ulonglong(ohosLifecycle.current()))
@@ -146,7 +181,8 @@ func FlClashStartTunAtEpoch(fd C.int, epoch C.ulonglong) C.int {
 			return errors.New("TUN is already running")
 		}
 		owned = false
-		listener, err := t.StartWithError(int(fd), "system", "172.19.0.1/30", "172.19.0.2")
+		listener, err := t.StartWithMTU(int(fd), ohosTunSettings.Stack,
+			"172.19.0.1/30,fdfe:dcba:9876::1/126", "0.0.0.0,::", ohosTunSettings.MTU)
 		if err != nil {
 			return err
 		}
@@ -192,6 +228,7 @@ func stopOHOSCore() {
 	}
 	ohosSecret.Store(nil)
 	ohosTunError.Store(nil)
+	ohosTunSettings = defaultTunRuntimeSettings()
 	resetPhysicalNetwork()
 }
 

@@ -106,9 +106,6 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -135,30 +132,6 @@ type physicalBindError struct {
 
 func (e physicalBindError) Error() string {
 	return fmt.Sprintf("physical network socket binding failed (stage=%d, code=%d)", e.stage, e.code)
-}
-
-// Only mihomo's outbound dialer uses this hook. Local loopback and the TUN
-// subnet must keep their ordinary routing, especially with the system stack's
-// local TCP forwarder. UDP wildcard listeners are outbound packet sockets.
-func needsPhysicalBinding(network, address string) bool {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return true
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return true
-	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
-		return false
-	}
-	if ip.IsUnspecified() {
-		return strings.HasPrefix(network, "udp")
-	}
-	if netip.MustParsePrefix("172.19.0.0/30").Contains(ip) {
-		return false
-	}
-	return true
 }
 
 func selectedPhysicalNetwork() (int32, error) {

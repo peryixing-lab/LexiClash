@@ -275,7 +275,7 @@ export struct ProfilesMainView {
       noResolve: ruleType === 'IP-CIDR' || ruleType === 'GEOIP',
       enabled: true
     });
-    this.store.notify();
+    this.store.applyNetworkSettings();
     try {
       this.getUIContext().getPromptAction().showToast({
         message: `已添加规则: ${ruleType},${payload},${targetGroup}`,
@@ -1150,6 +1150,7 @@ export struct ProfilesMainView {
                   .borderRadius(12)
                   .margin({ right: 8, bottom: 8 })
                   .onClick((): void => {
+                    this.store.blockStun = true;
                     this.addPresetRule('DST-PORT', '3478', 'REJECT');
                   })
 
@@ -1289,7 +1290,7 @@ export struct ProfilesMainView {
                         .selectedColor(this.palette.primary)
                         .onChange((v: boolean): void => {
                           rItem.enabled = v;
-                          this.store.notify();
+                          this.store.applyNetworkSettings();
                         })
                     }
                     .width('100%')

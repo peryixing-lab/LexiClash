@@ -4,6 +4,7 @@ package tun
 
 import "C"
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -29,6 +30,14 @@ func Start(fd int, stack string, address, dns string) *sing_tun.Listener {
 }
 
 func StartWithError(fd int, stack string, address, dns string) (*sing_tun.Listener, error) {
+	return StartWithMTU(fd, stack, address, dns, tunnelMTU)
+}
+
+func StartWithMTU(fd int, stack string, address, dns string, mtu uint32) (*sing_tun.Listener, error) {
+	if mtu < 1280 || mtu > 9000 {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("invalid TUN MTU: %d", mtu)
+	}
 	var prefix4 []netip.Prefix
 	var prefix6 []netip.Prefix
 	tunStack, ok := constant.StackTypeMapping[strings.ToLower(stack)]
@@ -85,7 +94,7 @@ func StartWithError(fd int, stack string, address, dns string) (*sing_tun.Listen
 		AutoDetectInterface: false,
 		Inet4Address:        prefix4,
 		Inet6Address:        prefix6,
-		MTU:                 tunnelMTU,
+		MTU:                 mtu,
 		FileDescriptor:      dupFd,
 	}
 
