@@ -249,6 +249,7 @@ export class VpnRuntimeManager {
     const tunError: string = TunConfig.validationError(tun);
     if (tunError.length > 0) { throw new Error(tunError); }
     await this.releaseVpn();
+    await BackgroundKeepAlive.stop();
     const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap, accessControl, tun);
     let denied: boolean = false;
     let rejectAuthorization: ((reason: Error) => void) | undefined = undefined;
@@ -307,18 +308,18 @@ export class VpnRuntimeManager {
       if (!ready) {
         throw new Error('VPN 扩展进程未响应启动，请确认设备支持系统 VPN 扩展后重试');
       }
-      // The native launch and extension already confirmed controller and TUN
-      // readiness. Notification setup is independent of connection readiness.
-      this.startKeepAlive().catch((error: Error): void => { RuntimeDiagnostics.record(String(error)); });
+      // Verify the task and its first progress update before reporting a
+      // connection that can survive backgrounding.
+      await this.startKeepAlive(true);
     } catch (error) {
       try {
         await this.releaseVpn();
       } catch (_releaseErr) {
         // ignore secondary cleanup error
       }
+      await BackgroundKeepAlive.stop();
       if (error instanceof Error) {
-        if (error instanceof Error) { throw error; }
-      throw new Error(String(error));
+        throw error;
       }
       throw new Error(String(error));
     } finally {
@@ -326,11 +327,15 @@ export class VpnRuntimeManager {
     }
   }
 
-  private startKeepAlive(): Promise<void> {
+  private startKeepAlive(userInitiated: boolean = false): Promise<void> {
     return BackgroundKeepAlive.start(VpnRuntimeManager.BUNDLE_NAME, 'EntryAbility', async (): Promise<number> => {
       const snapshot = await this.getConnectionsSnapshot();
       return snapshot.uploadTotal + snapshot.downloadTotal;
-    });
+    }, userInitiated);
+  }
+
+  getBackgroundError(): string {
+    return BackgroundKeepAlive.getLastError();
   }
 
   async stopVpn(): Promise<void> {
@@ -348,11 +353,16 @@ export class VpnRuntimeManager {
     }
     try {
       await this.checkController();
-      await this.startKeepAlive();
-      return true;
     } catch (_err) {
       return false;
     }
+    try {
+      await this.startKeepAlive();
+    } catch (error) {
+      // A background-task failure does not mean an existing VPN is disconnected.
+      RuntimeDiagnostics.record(`VPN background task unavailable on resume: ${String(error)}`);
+    }
+    return true;
   }
 
   startNetworkWatch(onNetworkRecover: (netIdChanged: boolean, netId: number) => void): void {

@@ -57,12 +57,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    RuntimeDiagnostics.record(`UI foreground: keepAlive=${BackgroundKeepAlive.getLastStatus()}`);
     AppStateStore.getInstance().setAppInForeground(true);
     // Ability has brought to foreground
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
+    RuntimeDiagnostics.record(`UI background: keepAlive=${BackgroundKeepAlive.getLastStatus()} active=${BackgroundKeepAlive.isActive()}`);
     AppStateStore.getInstance().setAppInForeground(false);
     AppStateStore.getInstance().persistState();
     // Ability has back to background

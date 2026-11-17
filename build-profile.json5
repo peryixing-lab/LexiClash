@@ -1,9 +1,24 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B3E09ED6E487E3D2FDC47E8FDB119CAD07539CA98FF2CBEB358E5352EF0993AA356C148C25F5F59",
+          "profile": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.p12",
+          "storePassword": "0000001BB198F80CC8CBCE57BC4209796DAC9C76F56F5209F6F2507FA5BCC9379B15C908E4F903C15BA03B"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",
+        "signingConfig": "default",
         "targetSdkVersion": "26.0.0",
         "compatibleSdkVersion": "26.0.0",
         "runtimeOS": "HarmonyOS",

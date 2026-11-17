@@ -676,6 +676,7 @@ export class AppStateStore {
     const startedAt: number = this.vpnManager.getSessionStartedAt();
     this.runTimeSeconds = startedAt > 0 ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
     this.lastTrafficSampleAt = 0;
+    this.reportBackgroundError();
     this.appendLog('info', 'VPN', 'LexiVpnExtension', 'Reattached to running VPN session');
     this.notify(false);
     this.refreshOutboundIp();
@@ -802,6 +803,14 @@ export class AppStateStore {
     }, 1000);
   }
 
+  private reportBackgroundError(): void {
+    const warning: string = this.vpnManager.getBackgroundError();
+    if (warning.length > 0 && warning !== this.lastOperationError) {
+      this.lastOperationError = warning;
+      this.appendLog('warning', 'VPN', 'Background', warning);
+    }
+  }
+
   private async pollLiveVpnStatsAsync(): Promise<void> {
     if (this.isPollingLiveStats || !this.isRunning || !this.hasManagedRuntime() ||
       this.isVpnTransitioning) {
@@ -809,6 +818,7 @@ export class AppStateStore {
     }
     this.isPollingLiveStats = true;
     try {
+      this.reportBackgroundError();
       const status: LexiVpnRuntimeStatus = this.vpnManager.getRuntimeStatus();
       if (status.status === 'stopped' || status.status === 'error') {
         this.isRunning = false;

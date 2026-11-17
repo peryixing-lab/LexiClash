@@ -23,7 +23,7 @@ function runtime({
     startCalls: [], stopCalls: [], tunCreates: [], tunDestroyed: 0, closedFds: [],
     nativeLaunchCalls: [], proxyLaunchCalls: [], nativeStartTunCalls: [], nativeStopCalls: 0,
     physicalNetId: 100, netConnections: [], keepAliveStarts: [], keepAliveStops: 0,
-    keepAliveCancelCb: null, notifications: []
+    keepAliveCancelCb: null, notifications: [], keepAliveStoppedIds: []
   };
   const native = {
     nativeInitCore: () => JSON.stringify({ id: 0, result: loaded ? { initialized: true } : null, error: loaded ? null : 'CORE_UNAVAILABLE' }),
@@ -129,17 +129,29 @@ function runtime({
       if (specifier === '@kit.NetworkKit') return network;
       if (specifier === '@kit.NotificationKit') return { notificationManager: {
         SlotType: { LIVE_VIEW: 6 }, ContentType: { NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW: 5 },
-        publish: async request => { vpnState.notifications.push(request); }
+        publish: async request => {
+          if (vpnHooks.publishNotification) await vpnHooks.publishNotification(request);
+          vpnState.notifications.push(request);
+        }
       } };
       if (specifier === '@kit.BackgroundTasksKit') return {
         backgroundTaskManager: {
           BackgroundMode: { DATA_TRANSFER: 1, TASK_KEEPING: 9 },
           BackgroundTaskMode: { MODE_DATA_TRANSFER: 1, MODE_TASK_KEEPING: 9 },
           BackgroundTaskSubmode: { SUBMODE_NORMAL_NOTIFICATION: 2, SUBMODE_LIVE_VIEW_NOTIFICATION: 3 },
+          ContinuousTaskCancelReason: { USER_CANCEL: 1, SYSTEM_CANCEL: 2 },
+          ContinuousTaskDetailedCancelReason: { USER_CANCEL_REMOVE_NOTIFICATION: 3, SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE: 12 },
           ContinuousTaskRequest: class { isModeSupported() { return false; } },
           on: (_type, cb) => { vpnState.keepAliveCancelCb = cb; },
-          startBackgroundRunning: async (_ctx, mode) => { vpnState.keepAliveStarts.push(mode); return { notificationId: 71, continuousTaskId: 91 }; },
-          stopBackgroundRunning: async () => { vpnState.keepAliveStops += 1; },
+          startBackgroundRunning: async (_ctx, mode) => {
+            vpnState.keepAliveStarts.push(mode);
+            if (vpnHooks.startBackgroundRunning) return vpnHooks.startBackgroundRunning(mode);
+            return { notificationId: 71, continuousTaskId: 91 };
+          },
+          stopBackgroundRunning: async (_ctx, id) => {
+            vpnState.keepAliveStops += 1;
+            vpnState.keepAliveStoppedIds.push(id);
+          },
           getAllContinuousTasks: async () => vpnState.keepAliveStarts.length > vpnState.keepAliveStops ? [{ id: 1 }] : []
         }
       };
@@ -189,6 +201,7 @@ function runtime({
   const { ThemeManager } = load(path.join(root, 'entry/src/main/ets/common/ThemeManager.ets'));
   const { ResponsiveLayout } = load(path.join(root, 'entry/src/main/ets/common/ResponsiveLayout.ets'));
   const { BackgroundKeepAlive } = load(path.join(root, 'entry/src/main/ets/core/BackgroundKeepAlive.ets'));
+  BackgroundKeepAlive.setAbilityContext({ bundleName: 'com.lovexjy.lexiclash' });
   const { VpnAuthorization } = load(path.join(root, 'entry/src/main/ets/core/VpnAuthorization.ets'));
   const { AppAccessControl } = load(path.join(root, 'entry/src/main/ets/core/AppAccessControl.ets'));
   const { TunConfig } = load(path.join(root, 'entry/src/main/ets/core/TunConfig.ets'));
@@ -1069,6 +1082,144 @@ test('KeepAlive & Network Recovery: injects keep-alive YAML, tracks continuous t
   }
 });
 
+test('KeepAlive: reports the real byte counter through the required data-transfer template, including idle updates', async () => {
+  const r = runtime({ realTimers: true });
+  try {
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 3145728);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskModes), [1]);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskSubmodes), [3]);
+    await new Promise(resolve => setTimeout(resolve, 35));
+    assert.ok(r.vpnState.notifications.length >= 2);
+    for (const notification of r.vpnState.notifications) {
+      assert.equal(notification.id, 71);
+      assert.equal(notification.template.name, 'downloadTemplate');
+      assert.equal(notification.template.data.progressValue, 3145728);
+      assert.equal(notification.template.data.fileName, '已传输 3.00 MiB');
+    }
+    await r.BackgroundKeepAlive.stop();
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: a rejected initial notification rolls back its task and leaves the start/stop queue usable', async () => {
+  let rejectNotification = true;
+  const r = runtime({ vpnHooks: { publishNotification: () => {
+    if (rejectNotification) throw { code: 1600004, message: 'Notification disabled' };
+  } } });
+  try {
+    await assert.rejects(r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 0), /1600004/);
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
+    rejectNotification = false;
+    await r.BackgroundKeepAlive.stop();
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 0);
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    assert.equal(r.vpnState.notifications[0].template.data.progressValue, 0);
+    await r.BackgroundKeepAlive.stop();
+    assert.equal(r.vpnState.keepAliveStops, 2);
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: stopping during the initial traffic read cannot publish or leave a task running', async () => {
+  let resolveTraffic;
+  const r = runtime();
+  try {
+    const starting = r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility',
+      () => new Promise(resolve => { resolveTraffic = resolve; }));
+    const rejected = assert.rejects(starting, /已取消/);
+    while (!resolveTraffic) await new Promise(resolve => setImmediate(resolve));
+    const stopping = r.BackgroundKeepAlive.stop();
+    resolveTraffic(1024);
+    await rejected;
+    await stopping;
+    assert.equal(r.vpnState.notifications.length, 0);
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 2048);
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: destroying the UI during task creation releases the late task without publishing', async () => {
+  let finishTask;
+  const r = runtime({ vpnHooks: { startBackgroundRunning: () => new Promise(resolve => { finishTask = resolve; }) } });
+  try {
+    const starting = r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 0);
+    const rejected = assert.rejects(starting, /已取消/);
+    while (!finishTask) await new Promise(resolve => setImmediate(resolve));
+    r.BackgroundKeepAlive.setAbilityContext(null);
+    finishTask({ notificationId: 71, continuousTaskId: 91 });
+    await rejected;
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
+    assert.equal(r.vpnState.notifications.length, 0);
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: dismissing the notification does not silently rearm on resume or misreport a healthy VPN', async () => {
+  const r = runtime({ realTimers: true });
+  try {
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test' });
+    r.disk.set('/sandbox/vpn-status.json', JSON.stringify({ status: 'running', cleanupComplete: false }));
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 1024);
+    r.vpnState.keepAliveCancelCb({ id: 91, reason: 1, detailedReason: 3 });
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+    assert.match(r.BackgroundKeepAlive.getLastError(), /通知已被关闭/);
+    const notificationCount = r.vpnState.notifications.length;
+    assert.equal(await r.store.vpnManager.isSessionHealthy(), true);
+    assert.equal(r.vpnState.keepAliveStarts.length, 1);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(r.vpnState.notifications.length, notificationCount);
+    await r.store.restoreExistingVpnSessionAsync();
+    assert.equal(r.store.isRunning, true);
+    assert.match(r.store.lastOperationError, /通知已被关闭/);
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 2048);
+    assert.equal(r.vpnState.keepAliveStarts.length, 2);
+    assert.equal(r.BackgroundKeepAlive.getLastError(), '');
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: a transient refresh failure is visible and the next real update recovers without restarting VPN', async () => {
+  let failRefresh = false;
+  const r = runtime({ realTimers: true, vpnHooks: { publishNotification: () => {
+    if (failRefresh) throw { code: 1600003, message: 'Service unavailable' };
+  } } });
+  try {
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 4096);
+    failRefresh = true;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.match(r.BackgroundKeepAlive.getLastError(), /1600003/);
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    failRefresh = false;
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(r.BackgroundKeepAlive.getLastError(), '');
+    assert.equal(r.vpnState.keepAliveStarts.length, 1);
+    assert.equal(r.vpnState.notifications.at(-1).template.data.progressValue, 4096);
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('VPN startup: rejected background protection fails connection and releases the native core and TUN', async () => {
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); },
+    startBackgroundRunning: () => { throw { code: 9800006, message: 'Notification verification failed' }; }
+  } });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    assert.equal(await r.store.toggleRunningAsync(), false);
+    assert.equal(r.store.isRunning, false);
+    assert.equal(r.store.coreStatus, 'disconnected');
+    assert.match(r.store.lastOperationError, /9800006/);
+    assert.equal(r.vpnState.tunDestroyed, 1);
+    assert.equal(r.vpnState.nativeStopCalls, 1);
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+  } finally { r.dispose(); }
+});
+
 test('Startup: awaitStartupReadyAsync resolves within maxWaitMs even when controller is unavailable', async () => {
   const r = runtime({ loaded: true, realTimers: true });
   try {
@@ -1447,7 +1598,7 @@ test('TUN: all connections use the system VPN and settings reconnect preserves a
   } finally { r.dispose(); }
 });
 
-test('Startup: a clean runtime skips dead-controller probes and slow notification setup', async () => {
+test('Startup: a clean runtime skips dead-controller probes and waits for background readiness', async () => {
   let extension;
   const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
     onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
@@ -1460,10 +1611,13 @@ test('Startup: a clean runtime skips dead-controller probes and slow notificatio
     assert.equal(r.httpState.requests.length, 0);
     assert.equal(r.vpnState.stopCalls.length, 0);
     r.BackgroundKeepAlive.start = () => new Promise(resolve => { finishNotification = resolve; });
-    assert.equal(await Promise.race([r.store.toggleRunningAsync(), new Promise(resolve => setTimeout(() => resolve('slow'), 200))]), true);
-    assert.equal(r.store.coreStatus, 'connected');
+    const connecting = r.store.toggleRunningAsync();
+    assert.equal(await Promise.race([connecting, new Promise(resolve => setTimeout(() => resolve('pending'), 100))]), 'pending');
+    assert.equal(r.store.coreStatus, 'connecting');
     assert.equal(r.httpState.requests.some(req => req.url.endsWith('/configs') && req.options.method === 'PATCH'), false);
     finishNotification();
+    assert.equal(await connecting, true);
+    assert.equal(r.store.coreStatus, 'connected');
     await r.store.toggleRunningAsync();
   } finally { if (finishNotification) finishNotification(); r.dispose(); }
 });
