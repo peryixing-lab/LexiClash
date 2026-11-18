@@ -1,9 +1,10 @@
 import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
 // ToolsComponents.ets — Mobile FlClash Tools & Settings View with ImmersivePage
 
-import { ImmersiveTitlePage } from './ImmersiveTitlePage';
+import { ImmersiveNavDestination, ImmersiveTitlePage } from './ImmersiveTitlePage';
 import { AppAccessSettingsView } from './AppAccessSettingsView';
 import { TunSettingsView } from './TunSettingsView';
+import { VideoEditorView } from './VideoEditorView';
 import { BackNavigationCoordinator, ImmersiveBackButton, ImmersivePageTransition } from './ImmersiveBackButton';
 import { ResponsiveLayout } from '../common/ResponsiveLayout';
 import {
@@ -28,6 +29,7 @@ export type ToolsSubPageKind =
     | 'dns'
     | 'resources'
     | 'logs'
+    | 'video'
     | 'language'
     | 'theme'
     | 'tun'
@@ -159,6 +161,7 @@ export struct ToolsMainView {
   @State webdavUserInput: string = '';
   @State webdavPassInput: string = '';
 
+  private toolsNavStack: NavPathStack = new NavPathStack();
   private store: AppStateStore = AppStateStore.getInstance();
   private core: CoreController = CoreController.getInstance();
 
@@ -175,16 +178,32 @@ export struct ToolsMainView {
 
   onSecondaryStateChange(): void {
     this.syncSecondaryDockState();
+    if (this.subPage !== 'main') {
+      ImmersivePageTransition.push(this.toolsNavStack, this.subPage);
+    } else {
+      ImmersivePageTransition.clear(this.toolsNavStack);
+    }
+  }
+
+  private navigateBackSubPage(): boolean {
+    if (ImmersivePageTransition.pop(this.toolsNavStack)) {
+      const remaining: string[] = this.toolsNavStack.getAllPathName();
+      this.subPage = remaining.length > 0
+        ? remaining[remaining.length - 1] as ToolsSubPageKind
+        : 'main';
+      return true;
+    }
+    if (this.subPage !== 'main') {
+      this.subPage = 'main';
+      return true;
+    }
+    return false;
   }
 
   aboutToAppear(): void {
     this.syncSecondaryDockState();
     BackNavigationCoordinator.register('tools', (): boolean => {
-      if (this.subPage !== 'main') {
-        this.subPage = 'main';
-        return true;
-      }
-      return false;
+      return this.navigateBackSubPage();
     });
   }
 
@@ -230,28 +249,30 @@ export struct ToolsMainView {
         target !== 'requests' &&
         target !== 'dns' &&
         target !== 'resources' &&
-        target !== 'logs'
+        target !== 'logs' &&
+        target !== 'video'
     ) {
       this.lastSettingsSubPage = target;
     }
     this.subPage = target;
   }
 
-  private activeSettingsKey(): ToolsSubPageKind {
+  private resolveSettingsKey(pageKey: ToolsSubPageKind): ToolsSubPageKind {
     if (
-      this.subPage === 'main' ||
-        this.subPage === 'requests' ||
-        this.subPage === 'dns' ||
-        this.subPage === 'resources' ||
-        this.subPage === 'logs'
+      pageKey === 'main' ||
+        pageKey === 'requests' ||
+        pageKey === 'dns' ||
+        pageKey === 'resources' ||
+        pageKey === 'logs' ||
+        pageKey === 'video'
     ) {
       return this.lastSettingsSubPage;
     }
-    return this.subPage;
+    return pageKey;
   }
 
-  private getSubPageTitle(): string {
-    const key: ToolsSubPageKind = this.activeSettingsKey();
+  private getSubPageTitle(pageKey: ToolsSubPageKind): string {
+    const key: ToolsSubPageKind = this.resolveSettingsKey(pageKey);
     const lang: string = this.selectedLocaleLang;
     if (key === 'language') return I18n.t('language', lang);
     if (key === 'theme') return I18n.t('theme', lang);
@@ -281,17 +302,17 @@ export struct ToolsMainView {
   }
 
   @Builder
-  subPageHeader() {
+  subPageHeader(pageKey: ToolsSubPageKind) {
     Row({ space: 10 }) {
       ImmersiveBackButton({
         palette: this.palette,
         immersiveEnabled: this.store.liquidGlass,
         onBack: (): void => {
-          this.subPage = 'main';
+          this.navigateBackSubPage();
         }
       })
 
-      Text(this.getSubPageTitle())
+      Text(this.getSubPageTitle(pageKey))
         .fontSize(26)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.palette.onSurface)
@@ -347,6 +368,14 @@ export struct ToolsMainView {
               onTapAction: (): void => {
                 this.subPage = 'logs';
               }
+            })
+            Divider().color(this.palette.divider).strokeWidth(0.5).margin({ left: 68, right: 16 })
+            ToolsGroupedRowItem({
+              iconRes: $r('sys.symbol.play_circle'),
+              titleText: '视频剪辑',
+              subtitleText: '裁剪片段 · MP4 导出',
+              palette: this.palette,
+              onTapAction: (): void => { this.subPage = 'video'; }
             })
           }
                 .width('100%')
@@ -506,9 +535,9 @@ export struct ToolsMainView {
   }
 
   @Builder
-  subPageBody() {
+  subPageBody(pageKey: ToolsSubPageKind) {
     Column({ space: 12 }) {
-      if (this.activeSettingsKey() === 'language') {
+      if (this.resolveSettingsKey(pageKey) === 'language') {
         Scroll() {
           Column({ space: 14 }) {
             Text(this.selectedLocaleLang === 'en_US'
@@ -559,7 +588,7 @@ export struct ToolsMainView {
         .layoutWeight(1)
         .width('100%')
         .align(Alignment.Top)
-      } else if (this.activeSettingsKey() === 'theme') {
+      } else if (this.resolveSettingsKey(pageKey) === 'theme') {
             Scroll() {
               Column({ space: 14 }) {
                 Column({ space: 10 }) {
@@ -728,7 +757,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'tun') {
+          } else if (this.resolveSettingsKey(pageKey) === 'tun') {
             Scroll() {
               Column() {
                 TunSettingsView({ palette: this.palette, revisionTick: this.revisionTick })
@@ -746,7 +775,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'access') {
+          } else if (this.resolveSettingsKey(pageKey) === 'access') {
             Scroll() {
               Column({ space: 12 }) {
                 AppAccessSettingsView({ palette: this.palette, revisionTick: this.revisionTick })
@@ -764,7 +793,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'backup') {
+          } else if (this.resolveSettingsKey(pageKey) === 'backup') {
             Scroll() {
               Column({ space: 14 }) {
                 Text('备份与恢复尚未接入。本地配置会自动保存在应用沙箱中。')
@@ -915,7 +944,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'advanced') {
+          } else if (this.resolveSettingsKey(pageKey) === 'advanced') {
             Scroll() {
               Column({ space: 12 }) {
                 Column({ space: 10 }) {
@@ -1004,7 +1033,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'general') {
+          } else if (this.resolveSettingsKey(pageKey) === 'general') {
             Scroll() {
               Column({ space: 12 }) {
                 this.switchSettingRow(
@@ -1079,7 +1108,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'disclaimer') {
+          } else if (this.resolveSettingsKey(pageKey) === 'disclaimer') {
             Scroll() {
               Column({ space: 14 }) {
                 Column({ space: 8 }) {
@@ -1143,7 +1172,7 @@ export struct ToolsMainView {
             .layoutWeight(1)
             .width('100%')
             .align(Alignment.Top)
-          } else if (this.activeSettingsKey() === 'about') {
+          } else if (this.resolveSettingsKey(pageKey) === 'about') {
             Scroll() {
               Column({ space: 16 }) {
                 Column({ space: 10 }) {
@@ -1222,104 +1251,81 @@ export struct ToolsMainView {
     .height('100%')
   }
 
-  build() {
-    Stack() {
-      Column() {
-        ImmersiveTitlePage({
-          palette: this.palette,
-          immersiveEnabled: this.store.liquidGlass,
-          scrollUnderTitle: true,
-          revisionTick: this.revisionTick,
-          header: (): void => { this.mainToolsHeader(); },
-          bodyContent: (): void => { this.mainToolsBody(); }
-        })
-      }
-      .width('100%')
-      .height('100%')
-
-      if (this.subPage === 'requests') {
-        Column() {
-          RequestsMonitorPage({
-            palette: this.palette,
-            revisionTick: this.revisionTick,
-            showBackButton: true,
-            onBack: (): void => {
-              this.subPage = 'main';
-            }
-          })
+  @Builder
+  toolsNavDestination(name: string) {
+    if (name === 'requests') {
+      RequestsMonitorPage({
+        palette: this.palette,
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.navigateBackSubPage();
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      } else if (this.subPage === 'dns') {
-        Column() {
-          DnsQueriesMonitorPage({
-            palette: this.palette,
-            revisionTick: this.revisionTick,
-            showBackButton: true,
-            onBack: (): void => {
-              this.subPage = 'main';
-            }
-          })
+      })
+    } else if (name === 'dns') {
+      DnsQueriesMonitorPage({
+        palette: this.palette,
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.navigateBackSubPage();
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      } else if (this.subPage === 'resources') {
-        Column() {
-          ExternalResourcesPage({
-            palette: this.palette,
-            revisionTick: this.revisionTick,
-            showBackButton: true,
-            onBack: (): void => {
-              this.subPage = 'main';
-            }
-          })
+      })
+    } else if (name === 'resources') {
+      ExternalResourcesPage({
+        palette: this.palette,
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.navigateBackSubPage();
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      } else if (this.subPage === 'logs') {
-        Column() {
-          LogsMonitorPage({
-            palette: this.palette,
-            revisionTick: this.revisionTick,
-            showBackButton: true,
-            onBack: (): void => {
-              this.subPage = 'main';
-            }
-          })
+      })
+    } else if (name === 'logs') {
+      LogsMonitorPage({
+        palette: this.palette,
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.navigateBackSubPage();
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      } else if (this.subPage !== 'main') {
-        Column() {
-          ImmersiveTitlePage({
-            palette: this.palette,
-            immersiveEnabled: this.store.liquidGlass,
-            scrollUnderTitle: true,
-            revisionTick: this.revisionTick,
-            header: (): void => { this.subPageHeader(); },
-            bodyContent: (): void => { this.subPageBody(); }
-          })
+      })
+    } else if (name === 'video') {
+      VideoEditorView({
+        palette: this.palette,
+        onBack: (): void => {
+          this.navigateBackSubPage();
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      }
+      })
+    } else {
+      ImmersiveNavDestination({
+        palette: this.palette,
+        immersiveEnabled: this.store.liquidGlass,
+        scrollUnderTitle: true,
+        revisionTick: this.revisionTick,
+        header: (): void => { this.subPageHeader(name as ToolsSubPageKind); },
+        bodyContent: (): void => { this.subPageBody(name as ToolsSubPageKind); },
+        onBackRequest: (): boolean => this.navigateBackSubPage()
+      })
     }
-    .width('100%')
-    .height('100%')
+  }
+
+  build() {
+    ImmersiveTitlePage({
+      palette: this.palette,
+      immersiveEnabled: this.store.liquidGlass,
+      scrollUnderTitle: true,
+      revisionTick: this.revisionTick,
+      navPathStack: this.toolsNavStack,
+      header: (): void => { this.mainToolsHeader(); },
+      bodyContent: (): void => { this.mainToolsBody(); },
+      navDestinationBuilder: (name: string): void => {
+        this.toolsNavDestination(name);
+      },
+      onNavBarVisibilityChange: (isVisible: boolean): void => {
+        if (isVisible && this.toolsNavStack.size() === 0 && this.subPage !== 'main') {
+          this.subPage = 'main';
+        }
+      }
+    })
   }
 }

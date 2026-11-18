@@ -1,7 +1,7 @@
 import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
 // ProxiesComponents.ets — Mobile FlClash Proxies View with Dedicated Reactive Node Cards & Node Selection
 
-import { ImmersiveTitlePage } from './ImmersiveTitlePage';
+import { ImmersiveNavDestination, ImmersiveTitlePage } from './ImmersiveTitlePage';
 import { BackNavigationCoordinator, ImmersiveBackButton, ImmersivePageTransition } from './ImmersiveBackButton';
 import { ResponsiveLayout } from '../common/ResponsiveLayout';
 import { FlClashColorPalette, I18n, ThemeManager } from '../common/ThemeManager';
@@ -369,8 +369,9 @@ export struct ProxiesMainView {
   @State showStylePanel: boolean = false;
   @State showAddNodePanel: boolean = false;
   @State expandedGroupIds: string[] = [];
-  @State showChainPanel: boolean = false;
+  @State @Watch('onChainPanelStateChange') showChainPanel: boolean = false;
 
+  private proxiesNavStack: NavPathStack = new NavPathStack();
   private lastStoreGroupId: string = '';
   private store: AppStateStore = AppStateStore.getInstance();
   private storeListener: () => void = (): void => {
@@ -412,6 +413,14 @@ export struct ProxiesMainView {
 
   onExternalRevision(): void {
     this.syncStateFromStore();
+  }
+
+  onChainPanelStateChange(): void {
+    if (this.showChainPanel) {
+      ImmersivePageTransition.push(this.proxiesNavStack, 'chain');
+    } else {
+      ImmersivePageTransition.clear(this.proxiesNavStack);
+    }
   }
 
   private syncStateFromStore(): void {
@@ -1138,39 +1147,43 @@ export struct ProxiesMainView {
     .height('100%')
   }
 
-  build() {
-    Stack() {
-      Column() {
-        ImmersiveTitlePage({
-          palette: this.palette,
-          immersiveEnabled: this.store.liquidGlass,
-          revisionTick: this.localTick,
-          header: (): void => { this.mainHeader(); },
-          bodyContent: (): void => { this.pageBody(); }
-        })
-      }
-      .width('100%')
-      .height('100%')
-
-      if (this.showChainPanel && (this.hasActiveGroups() || this.store.profiles.length > 0)) {
-        Column() {
-          ImmersiveTitlePage({
-            palette: this.palette,
-            immersiveEnabled: this.store.liquidGlass,
-            scrollUnderTitle: false,
-            revisionTick: this.localTick,
-            header: (): void => { this.chainHeader(); },
-            bodyContent: (): void => { this.chainBody(); }
-          })
+  @Builder
+  proxiesNavDestination(name: string) {
+    if (name === 'chain') {
+      ImmersiveNavDestination({
+        palette: this.palette,
+        immersiveEnabled: this.store.liquidGlass,
+        scrollUnderTitle: false,
+        revisionTick: this.localTick,
+        header: (): void => { this.chainHeader(); },
+        bodyContent: (): void => { this.chainBody(); },
+        onBackRequest: (): boolean => {
+          if (BackNavigationCoordinator.dispatch('chainModal')) {
+            return true;
+          }
+          this.exitChainMode();
+          return true;
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
-      }
+      })
     }
-    .width('100%')
-    .height('100%')
+  }
+
+  build() {
+    ImmersiveTitlePage({
+      palette: this.palette,
+      immersiveEnabled: this.store.liquidGlass,
+      revisionTick: this.localTick,
+      navPathStack: this.proxiesNavStack,
+      header: (): void => { this.mainHeader(); },
+      bodyContent: (): void => { this.pageBody(); },
+      navDestinationBuilder: (name: string): void => {
+        this.proxiesNavDestination(name);
+      },
+      onNavBarVisibilityChange: (isVisible: boolean): void => {
+        if (isVisible && this.proxiesNavStack.size() === 0 && this.showChainPanel) {
+          this.exitChainMode();
+        }
+      }
+    })
   }
 }

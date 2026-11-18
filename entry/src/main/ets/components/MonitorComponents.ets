@@ -1,7 +1,7 @@
 // MonitorComponents.ets — Standalone Mobile Views for Live Connections, Requests, DNS Queries, External Resources & Logs
 
 import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
-import { ImmersiveTitlePage } from './ImmersiveTitlePage';
+import { ImmersiveTitleHeader } from './ImmersiveTitlePage';
 import { ImmersiveBackButton } from './ImmersiveBackButton';
 import { ResponsiveLayout } from '../common/ResponsiveLayout';
 import { FlClashColorPalette, I18n, ThemeManager } from '../common/ThemeManager';
@@ -158,8 +158,10 @@ export struct LiveConnectionsPage {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop revisionTick: number = 0;
   @Prop showBackButton: boolean = true;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiBottomInset') bottomInset: number = 0;
   @StorageProp('lexiWindowWidthVp') windowWidthVp: number = 390;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
   onBack: () => void = (): void => {};
 
   @State searchKeyword: string = '';
@@ -345,14 +347,41 @@ export struct LiveConnectionsPage {
     .padding({ top: 6 })
   }
 
-  build() {
-    ImmersiveTitlePage({
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
       palette: this.palette,
       immersiveEnabled: this.store.liquidGlass,
-      revisionTick: this.revisionTick,
-      scrollUnderTitle: false,
-      header: (): void => { this.pageHeader(); },
-      bodyContent: (): void => { this.pageBody(); }
+      header: (): void => { this.pageHeader(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.pageBody()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.store.liquidGlass, false)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => {
+      this.onBack();
+      return true;
     })
   }
 }
@@ -362,8 +391,10 @@ export struct RequestsMonitorPage {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop revisionTick: number = 0;
   @Prop showBackButton: boolean = true;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiBottomInset') bottomInset: number = 0;
   @StorageProp('lexiWindowWidthVp') windowWidthVp: number = 390;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
   onBack: () => void = (): void => {};
 
   @State searchKeyword: string = '';
@@ -499,14 +530,41 @@ export struct RequestsMonitorPage {
     .padding({ top: 6 })
   }
 
-  build() {
-    ImmersiveTitlePage({
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
       palette: this.palette,
       immersiveEnabled: this.store.liquidGlass,
-      revisionTick: this.revisionTick,
-      scrollUnderTitle: false,
-      header: (): void => { this.pageHeader(); },
-      bodyContent: (): void => { this.pageBody(); }
+      header: (): void => { this.pageHeader(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.pageBody()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.store.liquidGlass, false)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => {
+      this.onBack();
+      return true;
     })
   }
 }
@@ -516,8 +574,10 @@ export struct DnsQueriesMonitorPage {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop revisionTick: number = 0;
   @Prop showBackButton: boolean = true;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiBottomInset') bottomInset: number = 0;
   @StorageProp('lexiWindowWidthVp') windowWidthVp: number = 390;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
   onBack: () => void = (): void => {};
 
   @State searchKeyword: string = '';
@@ -647,14 +707,41 @@ export struct DnsQueriesMonitorPage {
     .padding({ top: 6 })
   }
 
-  build() {
-    ImmersiveTitlePage({
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
       palette: this.palette,
       immersiveEnabled: this.store.liquidGlass,
-      revisionTick: this.revisionTick,
-      scrollUnderTitle: false,
-      header: (): void => { this.pageHeader(); },
-      bodyContent: (): void => { this.pageBody(); }
+      header: (): void => { this.pageHeader(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.pageBody()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.store.liquidGlass, false)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => {
+      this.onBack();
+      return true;
     })
   }
 }
@@ -664,8 +751,10 @@ export struct ExternalResourcesPage {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop revisionTick: number = 0;
   @Prop showBackButton: boolean = true;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiBottomInset') bottomInset: number = 0;
   @StorageProp('lexiWindowWidthVp') windowWidthVp: number = 390;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
   onBack: () => void = (): void => {};
 
   private store: AppStateStore = AppStateStore.getInstance();
@@ -766,14 +855,41 @@ export struct ExternalResourcesPage {
     .padding({ top: 6 })
   }
 
-  build() {
-    ImmersiveTitlePage({
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
       palette: this.palette,
       immersiveEnabled: this.store.liquidGlass,
-      revisionTick: this.revisionTick,
-      scrollUnderTitle: false,
-      header: (): void => { this.pageHeader(); },
-      bodyContent: (): void => { this.pageBody(); }
+      header: (): void => { this.pageHeader(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.pageBody()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.store.liquidGlass, false)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => {
+      this.onBack();
+      return true;
     })
   }
 }
@@ -783,8 +899,10 @@ export struct LogsMonitorPage {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop revisionTick: number = 0;
   @Prop showBackButton: boolean = true;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiBottomInset') bottomInset: number = 0;
   @StorageProp('lexiWindowWidthVp') windowWidthVp: number = 390;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
   onBack: () => void = (): void => {};
 
   @State searchKeyword: string = '';
@@ -933,14 +1051,41 @@ export struct LogsMonitorPage {
     .padding({ top: 6 })
   }
 
-  build() {
-    ImmersiveTitlePage({
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
       palette: this.palette,
       immersiveEnabled: this.store.liquidGlass,
-      revisionTick: this.revisionTick,
-      scrollUnderTitle: false,
-      header: (): void => { this.pageHeader(); },
-      bodyContent: (): void => { this.pageBody(); }
+      header: (): void => { this.pageHeader(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.pageBody()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.store.liquidGlass, false)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => {
+      this.onBack();
+      return true;
     })
   }
 }

@@ -18,3 +18,9 @@ target_link_libraries(clash_bridge PUBLIC libace_napi.z.so libhilog_ndk.z.so flc
 set_target_properties(clash_bridge PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "$ORIGIN")
+
+add_library(video_editor SHARED video_editor.cpp)
+target_compile_features(video_editor PRIVATE cxx_std_17)
+target_link_libraries(video_editor PUBLIC libace_napi.z.so
+    libnative_media_avsource.so libnative_media_avdemuxer.so
+    libnative_media_avmuxer.so libnative_media_core.so libnative_media_codecbase.so)

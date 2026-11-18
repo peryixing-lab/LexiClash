@@ -1,24 +1,18 @@
-import { LengthMetrics, uiMaterial } from '@kit.ArkUI';
 import { FlClashColorPalette, ThemeManager } from '../common/ThemeManager';
 import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
 
 @Component
-export struct ImmersiveTitlePage {
+export struct ImmersiveTitleHeader {
   @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
   @Prop immersiveEnabled: boolean = true;
-  @Prop revisionTick: number = 0;
-  @Prop scrollUnderTitle: boolean = false;
   @StorageProp('lexiTopInset') titleTopInset: number = 0;
   @StorageProp('lexiTitleButtonWidth') titleButtonWidth: number = 0;
-  @BuilderParam header: () => void;
-  @BuilderParam bodyContent: () => void;
-
-  private titleTheme(): CustomTheme {
-    return { colors: { compBackgroundGray: this.palette.page } };
-  }
+  @BuilderParam header: () => void = this.defaultHeader;
 
   @Builder
-  materialTitle() {
+  defaultHeader() {}
+
+  build() {
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.immersiveEnabled) {
         Column()
@@ -47,10 +41,44 @@ export struct ImmersiveTitlePage {
     .backgroundColor(this.immersiveEnabled ? Color.Transparent : this.palette.page)
     .clip(false)
   }
+}
+
+@Component
+export struct ImmersiveTitlePage {
+  @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
+  @Prop immersiveEnabled: boolean = true;
+  @Prop revisionTick: number = 0;
+  @Prop scrollUnderTitle: boolean = false;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
+  navPathStack: NavPathStack = new NavPathStack();
+  @BuilderParam header: () => void = this.defaultSlot;
+  @BuilderParam bodyContent: () => void = this.defaultSlot;
+  @BuilderParam navDestinationBuilder: (name: string) => void = this.defaultNavDestination;
+  onNavBarVisibilityChange: (isVisible: boolean) => void = (_isVisible: boolean): void => {};
+
+  @Builder
+  defaultSlot() {}
+
+  @Builder
+  defaultNavDestination(_name: string) {}
+
+  @Builder
+  renderNavDestination(name: string) {
+    this.navDestinationBuilder(name);
+  }
+
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
+      palette: this.palette,
+      immersiveEnabled: this.immersiveEnabled,
+      header: (): void => { this.header(); }
+    })
+  }
 
   build() {
-    WithTheme({ theme: this.titleTheme() }) {
-      Navigation() {
+    WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+      Navigation(this.navPathStack) {
         Column() {
           this.bodyContent()
         }
@@ -63,22 +91,73 @@ export struct ImmersiveTitlePage {
       .titleMode(NavigationTitleMode.Mini)
       .hideBackButton(true)
       .hideToolBar(true)
-      .title({ builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset }, {
-        barStyle: BarStyle.STACK,
-        backgroundColor: Color.Transparent,
-        scrollEffectOptions: this.immersiveEnabled && this.scrollUnderTitle
-          ? {
-            scrollEffectType: ScrollEffectType.GRADUAL_BLUR,
-            blurEffectiveStartOffset: LengthMetrics.vp(8),
-            blurEffectiveEndOffset: LengthMetrics.vp(32)
-          }
-          : undefined,
-        systemMaterial: this.immersiveEnabled && this.scrollUnderTitle ? undefined : uiMaterial.Material.empty
+      .navDestination(this.renderNavDestination)
+      .onNavBarStateChange((isVisible: boolean): void => {
+        this.onNavBarVisibilityChange(isVisible);
       })
+      .title(
+        { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+        ImmersiveTitleStyle.titleBarOptions(this.immersiveEnabled, this.scrollUnderTitle)
+      )
       .width('100%')
       .height('100%')
       .background(Color.Transparent)
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     }
+  }
+}
+
+@Component
+export struct ImmersiveNavDestination {
+  @Prop palette: FlClashColorPalette = ThemeManager.resolvePalette('dark', 'amber', 'vivid', false);
+  @Prop immersiveEnabled: boolean = true;
+  @Prop revisionTick: number = 0;
+  @Prop scrollUnderTitle: boolean = false;
+  @StorageProp('lexiTopInset') titleTopInset: number = 0;
+  @StorageProp('lexiReduceMotion') reduceMotion: boolean = false;
+  @BuilderParam header: () => void = this.defaultSlot;
+  @BuilderParam bodyContent: () => void = this.defaultSlot;
+  onBackRequest: () => boolean = (): boolean => false;
+  onDestinationDisappear: () => void = (): void => {};
+
+  @Builder
+  defaultSlot() {}
+
+  @Builder
+  materialTitle() {
+    ImmersiveTitleHeader({
+      palette: this.palette,
+      immersiveEnabled: this.immersiveEnabled,
+      header: (): void => { this.header(); }
+    })
+  }
+
+  build() {
+    NavDestination() {
+      WithTheme({ theme: ImmersiveTitleStyle.titleTheme(this.palette) }) {
+        Column() {
+          this.bodyContent()
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ top: this.scrollUnderTitle ? 0 : 64 + this.titleTopInset })
+      }
+    }
+    .mode(NavDestinationMode.STANDARD)
+    .hideBackButton(true)
+    .hideToolBar(true)
+    .systemTransition(this.reduceMotion ? NavigationSystemTransitionType.NONE : NavigationSystemTransitionType.DEFAULT)
+    .title(
+      { builder: (): void => { this.materialTitle(); }, height: 64 + this.titleTopInset },
+      ImmersiveTitleStyle.titleBarOptions(this.immersiveEnabled, this.scrollUnderTitle)
+    )
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.page)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onBackPressed((): boolean => this.onBackRequest())
+    .onWillDisappear((): void => {
+      this.onDestinationDisappear();
+    })
   }
 }

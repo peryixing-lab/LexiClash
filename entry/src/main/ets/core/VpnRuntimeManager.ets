@@ -43,10 +43,33 @@ export class VpnRuntimeManager {
   private lastPhysicalNetId: number = 0;
   private netLostObserved: boolean = false;
   private configQueue: Promise<void> = Promise.resolve<void>(undefined);
+  private recoveringPromise: Promise<boolean> | null = null;
+  private transitioning: boolean = false;
+  private consecutiveRecoveryFailures: number = 0;
+  private lastRecoveryAttemptAt: number = 0;
 
   setFilesDir(filesDir: string): void {
     this.filesDir = filesDir;
     this.loadSecretFromDisk();
+  }
+
+  enableBackgroundWatchdog(): void {
+    RuntimeDiagnostics.setVpnProcessDiedHandler((reason: string): void => {
+      if (this.shouldKeepVpnRunning()) {
+        this.recoverVpnIfInterrupted(`vpn-process-died:${reason}`);
+      }
+    });
+    BackgroundKeepAlive.setSystemCancelHandler((): void => {
+      if (this.shouldKeepVpnRunning()) {
+        this.recoverVpnIfInterrupted('keepalive-system-event');
+      }
+    });
+  }
+
+  setSecret(secret: string): void {
+    if (secret.length > 0) {
+      this.secretValue = secret;
+    }
   }
 
   getFilesDir(): string {
@@ -248,90 +271,286 @@ export class VpnRuntimeManager {
     if (accessError.length > 0) { throw new Error(accessError); }
     const tunError: string = TunConfig.validationError(tun);
     if (tunError.length > 0) { throw new Error(tunError); }
-    await this.releaseVpn();
-    await BackgroundKeepAlive.stop();
-    const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap, accessControl, tun);
-    let denied: boolean = false;
-    let rejectAuthorization: ((reason: Error) => void) | undefined = undefined;
-    const authorizationDenied: Promise<void> = new Promise<void>(
-      (_resolve: () => void, reject: (reason: Error) => void): void => {
-        rejectAuthorization = reject;
-      }
-    );
-
-    VpnAuthorization.subscribe((authorized: boolean): void => {
-      denied = !authorized;
-      if (denied && rejectAuthorization) {
-        rejectAuthorization(new Error('未授权 VPN，请重新连接并允许系统授权'));
-      }
-    });
-
-    let startTimeoutId: number = -1;
+    this.transitioning = true;
+    this.consecutiveRecoveryFailures = 0;
+    this.lastRecoveryAttemptAt = 0;
     try {
-      try {
-        await Promise.race<void>([
-          vpnExtension.startVpnExtensionAbility(this.vpnWant()),
-          authorizationDenied,
-          new Promise<void>((_resolve: () => void, reject: (reason: Error) => void): void => {
-            startTimeoutId = setTimeout((): void => {
-              reject(new Error('系统 VPN 授权或扩展启动超时（模拟器若不支持系统 VPN 服务可连接真机使用）'));
-            }, 60000);
-          })
-        ]);
-      } finally {
-        if (startTimeoutId !== -1) {
-          clearTimeout(startTimeoutId);
-        }
+      if (this.recoveringPromise !== null) {
+        try { await this.recoveringPromise; } catch (_err) {}
       }
-
-      const deadline: number = Date.now() + 45000;
-      let ready: boolean = false;
-      while (Date.now() < deadline) {
-        if (denied) {
-          throw new Error('未授权 VPN，请重新连接并允许系统授权');
-        }
-        const state: LexiVpnRuntimeStatus = this.getRuntimeStatus();
-        if (state.sessionId === sessionId) {
-          if (state.status === 'error') {
-            throw new Error(state.error || 'VPN 启动失败');
-          }
-          if (state.status === 'running') {
-            ready = true;
-            break;
-          }
-          if (state.status === 'stopped') {
-            throw new Error('VPN 启动已取消');
-          }
-        }
-        await this.pauseFor(250);
-      }
-      if (!ready) {
-        throw new Error('VPN 扩展进程未响应启动，请确认设备支持系统 VPN 扩展后重试');
-      }
-      // Verify the task and its first progress update before reporting a
-      // connection that can survive backgrounding.
-      await this.startKeepAlive(true);
-    } catch (error) {
-      try {
-        await this.releaseVpn();
-      } catch (_releaseErr) {
-        // ignore secondary cleanup error
-      }
+      await this.releaseVpn();
       await BackgroundKeepAlive.stop();
-      if (error instanceof Error) {
-        throw error;
+      const sessionId: string = this.prepareStartFiles(yamlContent, selectionsMap, accessControl, tun);
+      let denied: boolean = false;
+      let rejectAuthorization: ((reason: Error) => void) | undefined = undefined;
+      const authorizationDenied: Promise<void> = new Promise<void>(
+        (_resolve: () => void, reject: (reason: Error) => void): void => {
+          rejectAuthorization = reject;
+        }
+      );
+
+      VpnAuthorization.subscribe((authorized: boolean): void => {
+        denied = !authorized;
+        if (denied && rejectAuthorization) {
+          rejectAuthorization(new Error('未授权 VPN，请重新连接并允许系统授权'));
+        }
+      });
+
+      let startTimeoutId: number = -1;
+      try {
+        try {
+          await Promise.race<void>([
+            vpnExtension.startVpnExtensionAbility(this.vpnWant()),
+            authorizationDenied,
+            new Promise<void>((_resolve: () => void, reject: (reason: Error) => void): void => {
+              startTimeoutId = setTimeout((): void => {
+                reject(new Error('系统 VPN 授权或扩展启动超时（模拟器若不支持系统 VPN 服务可连接真机使用）'));
+              }, 60000);
+            })
+          ]);
+        } finally {
+          if (startTimeoutId !== -1) {
+            clearTimeout(startTimeoutId);
+          }
+        }
+
+        const deadline: number = Date.now() + 45000;
+        let ready: boolean = false;
+        while (Date.now() < deadline) {
+          if (denied) {
+            throw new Error('未授权 VPN，请重新连接并允许系统授权');
+          }
+          const state: LexiVpnRuntimeStatus = this.getRuntimeStatus();
+          if (state.sessionId === sessionId) {
+            if (state.status === 'error') {
+              throw new Error(state.error || 'VPN 启动失败');
+            }
+            if (state.status === 'running') {
+              ready = true;
+              break;
+            }
+            if (state.status === 'stopped') {
+              throw new Error('VPN 启动已取消');
+            }
+          }
+          await this.pauseFor(250);
+        }
+        if (!ready) {
+          throw new Error('VPN 扩展进程未响应启动，请确认设备支持系统 VPN 扩展后重试');
+        }
+        // Verify the task and its first progress update before reporting a
+        // connection that can survive backgrounding.
+        await this.startKeepAlive(true);
+      } catch (error) {
+        try {
+          await this.releaseVpn();
+        } catch (_releaseErr) {
+          // ignore secondary cleanup error
+        }
+        await BackgroundKeepAlive.stop();
+        if (error instanceof Error) {
+          throw error;
+        }
+        throw new Error(String(error));
+      } finally {
+        VpnAuthorization.unsubscribe();
       }
-      throw new Error(String(error));
     } finally {
-      VpnAuthorization.unsubscribe();
+      this.transitioning = false;
     }
   }
 
+  shouldKeepVpnRunning(): boolean {
+    if (this.filesDir.length === 0) {
+      return false;
+    }
+    try {
+      const raw: string = fs.readTextSync(`${this.filesDir}/vpn-command.json`);
+      const cmd: LexiVpnCommand = JSON.parse(raw) as LexiVpnCommand;
+      return cmd.action === 'start' && fs.accessSync(`${this.filesDir}/config.yaml`);
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  recoverVpnIfInterrupted(reason: string = 'watchdog'): Promise<boolean> {
+    if (this.recoveringPromise !== null) {
+      return this.recoveringPromise;
+    }
+    if (this.transitioning || !this.shouldKeepVpnRunning()) {
+      return Promise.resolve(false);
+    }
+    if (this.consecutiveRecoveryFailures >= 3 && Date.now() - this.lastRecoveryAttemptAt < 15000) {
+      RuntimeDiagnostics.record(`VPN recovery cooldown active reason=${reason} failures=${this.consecutiveRecoveryFailures}`);
+      return Promise.resolve(false);
+    }
+    const task: Promise<boolean> = BackgroundKeepAlive.runWithSuspendDelay(
+      `LexiClash recovery:${reason}`,
+      (): Promise<boolean> => this.doRecoverVpnSession(reason)
+    ).then(async (recovered: boolean): Promise<boolean> => {
+      if (recovered && !this.transitioning && this.shouldKeepVpnRunning() && !BackgroundKeepAlive.isActive()) {
+        try {
+          await this.startKeepAlive(false);
+        } catch (kaErr) {
+          RuntimeDiagnostics.record(`Post-recovery keepalive re-arm unavailable: ${String(kaErr)}`);
+        }
+      }
+      return recovered;
+    }).finally((): void => {
+      if (this.recoveringPromise === task) {
+        this.recoveringPromise = null;
+      }
+    });
+    this.recoveringPromise = task;
+    return task;
+  }
+
+  private async waitForRecoveryTeardown(previousSessionId: string): Promise<void> {
+    const teardownDeadline: number = Date.now() + 5000;
+    while (Date.now() < teardownDeadline) {
+      if (this.transitioning || !this.shouldKeepVpnRunning()) {
+        return;
+      }
+      const state: LexiVpnRuntimeStatus = this.getRuntimeStatus();
+      const statusCleared: boolean = previousSessionId.length > 0 && state.sessionId === previousSessionId &&
+        state.cleanupComplete && (state.status === 'stopped' || state.status === 'error');
+      const tunActive: boolean = await this.systemVpnIsActive();
+      if (!tunActive) {
+        if (statusCleared) {
+          return;
+        }
+        try {
+          await this.request('/version', http.RequestMethod.GET, '', 500);
+        } catch (_err) {
+          return;
+        }
+      }
+      await this.pauseFor(150);
+    }
+  }
+
+  private async doRecoverVpnSession(reason: string): Promise<boolean> {
+    if (this.transitioning || !this.shouldKeepVpnRunning()) {
+      return false;
+    }
+    try {
+      const tunActive: boolean = await this.systemVpnIsActive();
+      if (tunActive) {
+        try {
+          await this.checkController();
+          this.consecutiveRecoveryFailures = 0;
+          if (!BackgroundKeepAlive.isActive()) {
+            try {
+              await this.startKeepAlive(false);
+            } catch (kaErr) {
+              RuntimeDiagnostics.record(`KeepAlive recovery unavailable in background: ${String(kaErr)}`);
+            }
+          }
+          return true;
+        } catch (_ctrlErr) {
+          // Controller unreachable despite TUN; proceed to restart extension.
+        }
+      }
+    } catch (_checkErr) {}
+
+    if (this.transitioning || !this.shouldKeepVpnRunning()) {
+      return false;
+    }
+    let currentCmd: LexiVpnCommand;
+    try {
+      currentCmd = JSON.parse(fs.readTextSync(`${this.filesDir}/vpn-command.json`)) as LexiVpnCommand;
+    } catch (_err) {
+      return false;
+    }
+    if (currentCmd.action !== 'start') {
+      return false;
+    }
+    if (typeof currentCmd.secret === 'string' && currentCmd.secret.length > 0) {
+      this.secretValue = currentCmd.secret;
+    } else if (this.secretValue.length === 0) {
+      this.secretValue = this.generateRandomToken();
+    }
+    const nextSessionId: string = this.generateRandomToken();
+    const nextCmd: LexiVpnCommand = {
+      sessionId: nextSessionId,
+      action: 'start',
+      requestedAt: Date.now(),
+      secret: this.secretValue,
+      accessControl: currentCmd.accessControl ?? AppAccessControl.unrestricted(),
+      tun: currentCmd.tun ?? TunConfig.defaults()
+    };
+    RuntimeDiagnostics.record(`Recovering interrupted VPN session reason=${reason} session=${nextSessionId}`);
+    this.lastRecoveryAttemptAt = Date.now();
+    this.consecutiveRecoveryFailures++;
+    try {
+      try {
+        await vpnExtension.stopVpnExtensionAbility(this.vpnWant());
+      } catch (_stopErr) {}
+      await this.waitForRecoveryTeardown(currentCmd.sessionId);
+      if (this.transitioning || !this.shouldKeepVpnRunning()) {
+        this.consecutiveRecoveryFailures = 0;
+        return false;
+      }
+      this.writePrivateFile('vpn-command.json', JSON.stringify(nextCmd));
+      await vpnExtension.startVpnExtensionAbility(this.vpnWant());
+      const deadline: number = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        if (this.transitioning || !this.shouldKeepVpnRunning()) {
+          this.consecutiveRecoveryFailures = 0;
+          return false;
+        }
+        const state: LexiVpnRuntimeStatus = this.getRuntimeStatus();
+        if (state.sessionId === nextSessionId) {
+          if (state.status === 'running') {
+            this.consecutiveRecoveryFailures = 0;
+            if (!BackgroundKeepAlive.isActive()) {
+              try {
+                await this.startKeepAlive(false);
+              } catch (kaErr) {
+                RuntimeDiagnostics.record(`KeepAlive recovery unavailable after restart: ${String(kaErr)}`);
+              }
+            }
+            RuntimeDiagnostics.record(`VPN session recovered in background session=${nextSessionId}`);
+            return true;
+          }
+          if (state.status === 'error' || state.status === 'stopped') {
+            RuntimeDiagnostics.record(`VPN recovery failed status=${state.status} error=${state.error}`);
+            return false;
+          }
+        }
+        await this.pauseFor(200);
+      }
+    } catch (err) {
+      RuntimeDiagnostics.record(`VPN recovery exception: ${String(err)}`);
+    }
+    return false;
+  }
+
   private startKeepAlive(userInitiated: boolean = false): Promise<void> {
+    let firstProbe: boolean = true;
     return BackgroundKeepAlive.start(VpnRuntimeManager.BUNDLE_NAME, 'EntryAbility', async (): Promise<number> => {
-      const snapshot = await this.getConnectionsSnapshot();
-      return snapshot.uploadTotal + snapshot.downloadTotal;
+      const checkTunnel: boolean = !firstProbe;
+      firstProbe = false;
+      try {
+        if (checkTunnel && !this.transitioning && this.shouldKeepVpnRunning() && !await this.systemVpnIsActive()) {
+          RuntimeDiagnostics.record('System TUN interface missing during background check; triggering recovery');
+          await this.recoverVpnIfInterrupted('system-vpn-missing');
+        }
+        return await this.getTransferredBytes();
+      } catch (err) {
+        if (!this.transitioning && this.shouldKeepVpnRunning()) {
+          const recovered: boolean = await this.recoverVpnIfInterrupted('keepalive-poll-error');
+          if (recovered) {
+            return await this.getTransferredBytes();
+          }
+        }
+        throw err instanceof Error ? err : new Error(String(err));
+      }
     }, userInitiated);
+  }
+
+  getKeepAliveStatus(): string {
+    return BackgroundKeepAlive.getLastStatus();
   }
 
   getBackgroundError(): string {
@@ -339,14 +558,30 @@ export class VpnRuntimeManager {
   }
 
   async stopVpn(): Promise<void> {
+    this.transitioning = true;
+    this.consecutiveRecoveryFailures = 0;
+    this.lastRecoveryAttemptAt = 0;
+    this.consecutiveRecoveryFailures = 0;
+    this.lastRecoveryAttemptAt = 0;
     try {
+      this.requestVpnStop();
+      if (this.recoveringPromise !== null) {
+        try { await this.recoveringPromise; } catch (_err) {}
+      }
       await this.releaseVpn();
     } finally {
-      await BackgroundKeepAlive.stop();
+      try {
+        await BackgroundKeepAlive.stop();
+      } finally {
+        this.transitioning = false;
+      }
     }
   }
 
   async isSessionHealthy(): Promise<boolean> {
+    if (this.recoveringPromise !== null) {
+      try { await this.recoveringPromise; } catch (_err) {}
+    }
     const status: LexiVpnRuntimeStatus = this.getRuntimeStatus();
     if (status.status !== 'running' || status.cleanupComplete) {
       return false;
@@ -370,15 +605,24 @@ export class VpnRuntimeManager {
   }
 
   async systemVpnIsActive(): Promise<boolean> {
-    const networks: connection.NetHandle[] = await connection.getAllNets();
+    let networks: connection.NetHandle[];
+    try {
+      networks = await connection.getAllNets();
+    } catch (_err) {
+      return false;
+    }
     for (let i: number = 0; i < networks.length; i++) {
-      const capabilities: connection.NetCapabilities = await connection.getNetCapabilities(networks[i]);
-      if (capabilities.bearerTypes.indexOf(connection.NetBearType.BEARER_VPN) < 0) { continue; }
-      const properties: connection.ConnectionProperties = await connection.getConnectionProperties(networks[i]);
-      // Match our TUN address, rather than accepting another application's VPN.
-      if (properties.linkAddresses.some((link: connection.LinkAddress): boolean =>
-        link.address.address === '172.19.0.1' || link.address.address === 'fdfe:dcba:9876::1')) {
-        return true;
+      try {
+        const capabilities: connection.NetCapabilities = await connection.getNetCapabilities(networks[i]);
+        if (capabilities.bearerTypes.indexOf(connection.NetBearType.BEARER_VPN) < 0) { continue; }
+        const properties: connection.ConnectionProperties = await connection.getConnectionProperties(networks[i]);
+        // Match our TUN address, rather than accepting another application's VPN.
+        if (properties.linkAddresses.some((link: connection.LinkAddress): boolean =>
+          link.address.address === '172.19.0.1' || link.address.address === 'fdfe:dcba:9876::1')) {
+          return true;
+        }
+      } catch (_netErr) {
+        // Ignore transient stale network handle during physical handover.
       }
     }
     return false;
@@ -450,22 +694,43 @@ export class VpnRuntimeManager {
     body: string = '',
     readTimeout: number = 8000
   ): Promise<string> {
+    if (this.secretValue.length === 0) {
+      this.loadSecretFromDisk();
+    }
     const endpoint: string = this.controllerUrl;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {};
+    if (body.length > 0) {
+      headers['Content-Type'] = 'application/json';
+    }
     if (this.secretValue.length > 0) {
       headers['Authorization'] = `Bearer ${this.secretValue}`;
     }
     const client: http.HttpRequest = http.createHttp();
     try {
-      const result: http.HttpResponse = await client.request(endpoint + path, {
+      const options: http.HttpRequestOptions = {
         method: method,
         header: headers,
-        extraData: body,
         connectTimeout: 2500,
         readTimeout: readTimeout,
         usingCache: false,
+        usingProxy: false,
         expectDataType: http.HttpDataType.STRING
-      });
+      };
+      if (body.length > 0) {
+        options.extraData = body;
+      }
+      let result: http.HttpResponse;
+      try {
+        result = await client.request(endpoint + path, options);
+      } catch (reqErr) {
+        if (reqErr instanceof Error) {
+          throw reqErr;
+        }
+        const errObj: Record<string, Object> = reqErr as Record<string, Object>;
+        const codeText: string = errObj?.['code'] !== undefined ? String(errObj['code']) : '';
+        const msgText: string = errObj?.['message'] !== undefined ? String(errObj['message']) : String(reqErr);
+        throw new Error(`${codeText} ${msgText}`.trim());
+      }
       if (result.responseCode < 200 || result.responseCode >= 300) {
         let detail: string = '';
         try {
@@ -620,6 +885,23 @@ export class VpnRuntimeManager {
       }
     }
     return -1;
+  }
+
+  async getTransferredBytes(): Promise<number> {
+    const raw: string = await this.request('/connections', http.RequestMethod.GET, '', 3000);
+    if (raw.length > 8192) {
+      const upMatch: RegExpExecArray | null = /"uploadTotal"\s*:\s*(\d+)/.exec(raw);
+      const downMatch: RegExpExecArray | null = /"downloadTotal"\s*:\s*(\d+)/.exec(raw);
+      if (upMatch !== null && downMatch !== null) {
+        const up: number = Number(upMatch[1]);
+        const down: number = Number(downMatch[1]);
+        if (Number.isFinite(up) && Number.isFinite(down)) {
+          return up + down;
+        }
+      }
+    }
+    const data: Record<string, Object> = JSON.parse(raw) as Record<string, Object>;
+    return Number(data['uploadTotal'] ?? 0) + Number(data['downloadTotal'] ?? 0);
   }
 
   async getConnectionsSnapshot(): Promise<LexiControllerTraffic> {

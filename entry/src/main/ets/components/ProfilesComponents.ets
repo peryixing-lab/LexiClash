@@ -1,7 +1,7 @@
 import { ImmersiveTitleStyle } from '../common/ImmersiveTitleStyle';
 // ProfilesComponents.ets — Mobile FlClash Profiles View with ImmersivePage & NullStatus on Install
 
-import { ImmersiveTitlePage } from './ImmersiveTitlePage';
+import { ImmersiveNavDestination, ImmersiveTitlePage } from './ImmersiveTitlePage';
 import { BackNavigationCoordinator, ImmersiveBackButton, ImmersivePageTransition } from './ImmersiveBackButton';
 import { ResponsiveLayout } from '../common/ResponsiveLayout';
 import { FlClashColorPalette, I18n, ThemeManager } from '../common/ThemeManager';
@@ -51,6 +51,7 @@ export struct ProfilesMainView {
   @State newRuleTarget: string = 'Proxy';
   @State localTick: number = 0;
 
+  private profilesNavStack: NavPathStack = new NavPathStack();
   private store: AppStateStore = AppStateStore.getInstance();
   private storeListener: () => void = (): void => {
     this.localTick += 1;
@@ -62,6 +63,12 @@ export struct ProfilesMainView {
 
   onSecondaryStateChange(): void {
     this.syncSecondaryDockState();
+    if (this.activeModal !== 'none') {
+      this.renderedModal = this.activeModal;
+      ImmersivePageTransition.push(this.profilesNavStack, this.activeModal);
+    } else {
+      ImmersivePageTransition.clear(this.profilesNavStack);
+    }
   }
 
   aboutToAppear(): void {
@@ -317,8 +324,10 @@ export struct ProfilesMainView {
     this.activeModal = 'none';
   }
 
-  private getActiveHeaderTitle(): string {
-    const modalKey: string = this.activeModal === 'none' ? this.renderedModal : this.activeModal;
+  private getActiveHeaderTitle(modalName: string): string {
+    const modalKey: string = modalName.length > 0
+      ? modalName
+      : (this.activeModal === 'none' ? this.renderedModal : this.activeModal);
     if (modalKey === 'add') {
       return this.store.localeLang === 'en_US' ? 'Add Profile' : '添加配置';
     }
@@ -389,7 +398,7 @@ export struct ProfilesMainView {
   }
 
   @Builder
-  modalHeader() {
+  modalHeader(modalName: string) {
     Row({ space: 10 }) {
       ImmersiveBackButton({
         palette: this.palette,
@@ -399,7 +408,7 @@ export struct ProfilesMainView {
         }
       })
 
-      Text(this.getActiveHeaderTitle())
+      Text(this.getActiveHeaderTitle(modalName))
         .fontSize(26)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.palette.onSurface)
@@ -631,9 +640,9 @@ export struct ProfilesMainView {
   }
 
   @Builder
-  modalBody() {
+  modalBody(modalName: string) {
     Column({ space: 12 }) {
-      if (this.renderedModal === 'add') {
+      if (modalName === 'add') {
         Scroll() {
           Column({ space: 14 }) {
             Text(this.store.localeLang === 'en_US' ? 'Add Profile' : '添加配置')
@@ -801,7 +810,7 @@ export struct ProfilesMainView {
         .padding({ left: 18, right: 18, bottom: ResponsiveLayout.secondaryBottomPadding(this.bottomInset) })
         .layoutWeight(1)
         .align(Alignment.Top)
-      } else if (this.renderedModal === 'proxiesEditor') {
+      } else if (modalName === 'proxiesEditor') {
         Scroll() {
           Column({ space: 12 }) {
             Row({ space: 8 }) {
@@ -1063,7 +1072,7 @@ export struct ProfilesMainView {
         .contentEndOffset(this.bottomInset)
         .layoutWeight(1)
         .align(Alignment.Top)
-      } else if (this.renderedModal === 'yamlEditor') {
+      } else if (modalName === 'yamlEditor') {
         Column({ space: 10 }) {
           Row({ space: 8 }) {
             Circle({ width: 8, height: 8 })
@@ -1119,7 +1128,7 @@ export struct ProfilesMainView {
         .layoutWeight(1)
         .width('100%')
         .padding({ bottom: ResponsiveLayout.secondaryBottomPadding(this.bottomInset) })
-      } else if (this.renderedModal === 'overrides') {
+      } else if (modalName === 'overrides') {
         Scroll() {
           Column({ space: 14 }) {
             Column({ space: 10 }) {
@@ -1425,40 +1434,39 @@ export struct ProfilesMainView {
     .height('100%')
   }
 
-  build() {
-    Stack() {
-      Column() {
-        ImmersiveTitlePage({
-          palette: this.palette,
-          immersiveEnabled: this.store.liquidGlass,
-          scrollUnderTitle: true,
-          revisionTick: this.revisionTick,
-          header: (): void => { this.mainHeader(); },
-          bodyContent: (): void => { this.mainBody(); }
-        })
+  @Builder
+  profilesNavDestination(name: string) {
+    ImmersiveNavDestination({
+      palette: this.palette,
+      immersiveEnabled: this.store.liquidGlass,
+      scrollUnderTitle: name !== 'yamlEditor',
+      revisionTick: this.revisionTick,
+      header: (): void => { this.modalHeader(name); },
+      bodyContent: (): void => { this.modalBody(name); },
+      onBackRequest: (): boolean => {
+        this.activeModal = 'none';
+        return true;
       }
-      .width('100%')
-      .height('100%')
+    })
+  }
 
-      if (this.activeModal !== 'none') {
-        Column() {
-          ImmersiveTitlePage({
-            palette: this.palette,
-            immersiveEnabled: this.store.liquidGlass,
-            scrollUnderTitle: this.renderedModal !== 'yamlEditor',
-            revisionTick: this.revisionTick,
-            header: (): void => { this.modalHeader(); },
-            bodyContent: (): void => { this.modalBody(); }
-          })
+  build() {
+    ImmersiveTitlePage({
+      palette: this.palette,
+      immersiveEnabled: this.store.liquidGlass,
+      scrollUnderTitle: true,
+      revisionTick: this.revisionTick,
+      navPathStack: this.profilesNavStack,
+      header: (): void => { this.mainHeader(); },
+      bodyContent: (): void => { this.mainBody(); },
+      navDestinationBuilder: (name: string): void => {
+        this.profilesNavDestination(name);
+      },
+      onNavBarVisibilityChange: (isVisible: boolean): void => {
+        if (isVisible && this.profilesNavStack.size() === 0 && this.activeModal !== 'none') {
+          this.activeModal = 'none';
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.page)
-        .zIndex(1)
-        .transition(ImmersivePageTransition.secondaryPage())
       }
-    }
-    .width('100%')
-    .height('100%')
+    })
   }
 }

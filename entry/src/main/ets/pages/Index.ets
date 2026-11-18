@@ -67,6 +67,7 @@ struct Index {
   @StorageProp('lexiSystemDark') @Watch('updateWindowChrome') systemDarkMode: boolean = false;
   @StorageProp('lexiWindowReady') @Watch('updateWindowChrome') immersiveWindowReady: boolean = false;
   private mobileTabsController: TabsController = new TabsController();
+  private dashboardNavStack: NavPathStack = new NavPathStack();
   // Match LexiNote-Harmony's native tab spring and 220ms base transition.
   private readonly tabSpring: curves.ICurve = curves.springMotion(0.35, 0.86);
   private readonly selectionCurve: curves.ICurve = curves.cubicBezierCurve(0.23, 1, 0.32, 1);
@@ -225,8 +226,10 @@ struct Index {
   private selectTab(tab: MainTabKey): void {
     if (tab === 'connections') {
       this.dashboardDetailOpen = true;
+      ImmersivePageTransition.push(this.dashboardNavStack, this.monitorInitialTab);
     } else if (tab === 'dashboard') {
       this.dashboardDetailOpen = false;
+      ImmersivePageTransition.clear(this.dashboardNavStack);
     }
     this.selectedDockTab = tab === 'connections' ? 'dashboard' : tab;
     const index: number = this.getMobileTabIndex(tab);
@@ -832,15 +835,59 @@ struct Index {
   }
 
   @Builder
+  dashboardNavDestination(name: string) {
+    if (name === 'requests') {
+      RequestsMonitorPage({
+        palette: this.getPalette(),
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.selectTab('dashboard');
+        }
+      })
+    } else if (name === 'dns') {
+      DnsQueriesMonitorPage({
+        palette: this.getPalette(),
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.selectTab('dashboard');
+        }
+      })
+    } else {
+      LiveConnectionsPage({
+        palette: this.getPalette(),
+        revisionTick: this.revisionTick,
+        showBackButton: true,
+        onBack: (): void => {
+          this.selectTab('dashboard');
+        }
+      })
+    }
+  }
+
+  @Builder
   dashboardPage() {
     ImmersiveTitlePage({
       palette: this.getPalette(),
       immersiveEnabled: this.store.liquidGlass,
       scrollUnderTitle: true,
       revisionTick: this.revisionTick,
+      navPathStack: this.dashboardNavStack,
       header: (): void => { this.dashboardTopBar(); },
       bodyContent: (): void => {
         this.mobileDashboardList()
+      },
+      navDestinationBuilder: (name: string): void => {
+        this.dashboardNavDestination(name);
+      },
+      onNavBarVisibilityChange: (isVisible: boolean): void => {
+        if (isVisible && this.dashboardNavStack.size() === 0 && this.dashboardDetailOpen) {
+          this.dashboardDetailOpen = false;
+          if (this.currentTab === 'connections') {
+            this.currentTab = 'dashboard';
+          }
+        }
       }
     })
   }
@@ -961,47 +1008,7 @@ struct Index {
   mobileTabs() {
     Tabs({ index: this.getMobileTabIndex(this.currentTab), controller: this.mobileTabsController }) {
       TabContent() {
-        Stack() {
-          Column() {
-            this.dashboardPage()
-          }
-          .width('100%')
-          .height('100%')
-
-          if (this.dashboardDetailOpen) {
-            Column() {
-              if (this.monitorInitialTab === 'requests') {
-                RequestsMonitorPage({
-                  palette: this.getPalette(),
-                  revisionTick: this.revisionTick,
-                  showBackButton: true,
-                  onBack: (): void => { this.selectTab('dashboard'); }
-                })
-              } else if (this.monitorInitialTab === 'dns') {
-                DnsQueriesMonitorPage({
-                  palette: this.getPalette(),
-                  revisionTick: this.revisionTick,
-                  showBackButton: true,
-                  onBack: (): void => { this.selectTab('dashboard'); }
-                })
-              } else {
-                LiveConnectionsPage({
-                  palette: this.getPalette(),
-                  revisionTick: this.revisionTick,
-                  showBackButton: true,
-                  onBack: (): void => { this.selectTab('dashboard'); }
-                })
-              }
-            }
-            .width('100%')
-            .height('100%')
-            .backgroundColor(this.getPalette().page)
-            .zIndex(1)
-            .transition(ImmersivePageTransition.secondaryPage())
-          }
-        }
-        .width('100%')
-        .height('100%')
+        this.dashboardPage()
       }
       .tabBar(this.mobileDockItem('dashboard', $r('sys.symbol.square_grid_2x2'), 'dashboard'))
       .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])

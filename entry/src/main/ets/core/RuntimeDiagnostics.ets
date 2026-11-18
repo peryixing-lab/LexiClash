@@ -1,6 +1,14 @@
 import { hiAppEvent, hilog } from '@kit.PerformanceAnalysisKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 
+interface LexiExitDetailInfo {
+  pid?: string | number;
+  process_name?: string;
+  kill_reason?: string;
+  pss?: string | number;
+  rss?: string | number;
+}
+
 interface LexiFaultParams {
   time?: number;
   pid?: number;
@@ -8,6 +16,7 @@ interface LexiFaultParams {
   foreground?: boolean;
   reason?: string;
   external_log?: string[];
+  last_exit_detail_info?: LexiExitDetailInfo;
 }
 
 // System-delivered reports cover both the UI and VPN processes. Keep the
@@ -16,6 +25,11 @@ export class RuntimeDiagnostics {
   private static watching: boolean = false;
   private static filesDir: string = '';
   private static journalPath: string = '';
+  private static vpnProcessDiedHandler: ((reason: string) => void) | null = null;
+
+  static setVpnProcessDiedHandler(handler: ((reason: string) => void) | null): void {
+    RuntimeDiagnostics.vpnProcessDiedHandler = handler;
+  }
 
   static record(message: string): void {
     const safe: string = message.replace(/https?:\/\/[^\s"']+/g, '[URL]')
@@ -64,10 +78,21 @@ export class RuntimeDiagnostics {
           groups.forEach((group: hiAppEvent.AppEventGroup): void => {
             group.appEventInfos.forEach((event: hiAppEvent.AppEventInfo): void => {
               const params: LexiFaultParams = event.params as LexiFaultParams;
+              const detail: LexiExitDetailInfo | undefined = params.last_exit_detail_info;
+              const pid: string = String(params.pid ?? detail?.pid ?? 'unknown');
+              const procName: string = String(params.process_name ?? detail?.process_name ?? 'unknown');
+              const reason: string = String(params.reason ?? detail?.kill_reason ?? 'unknown');
               RuntimeDiagnostics.record(
-                `${event.name} time=${params.time} pid=${params.pid} process=${params.process_name} foreground=${params.foreground} reason=${params.reason}`
+                `${event.name} time=${params.time} pid=${pid} process=${procName} foreground=${params.foreground} reason=${reason}`
               );
               RuntimeDiagnostics.record(`System fault parameters: ${JSON.stringify(event.params)}`);
+              if ((event.name === hiAppEvent.event.APP_KILLED || event.name === hiAppEvent.event.APP_CRASH ||
+                event.name === hiAppEvent.event.APP_FREEZE) &&
+                procName.endsWith(':vpn') && RuntimeDiagnostics.vpnProcessDiedHandler !== null) {
+                try {
+                  RuntimeDiagnostics.vpnProcessDiedHandler(reason);
+                } catch (_handlerErr) {}
+              }
               (params.external_log ?? []).slice(0, 2).forEach((path: string): void => {
                 if (!path.startsWith('/data/storage/el2/log/hiappevent/')) { return; }
                 fs.readText(path, { length: 24000 }).then((report: string): void => {

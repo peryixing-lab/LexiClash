@@ -7,11 +7,11 @@
         "material": {
           "certpath": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001B3E09ED6E487E3D2FDC47E8FDB119CAD07539CA98FF2CBEB358E5352EF0993AA356C148C25F5F59",
+          "keyPassword": "0000001BF33F385353299B27791EE5B270D1100ECB9FBD93DC9D5D44136AF8C6967E05DC25B23A5C22AED8",
           "profile": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.p7b",
           "signAlg": "SHA256withECDSA",
           "storeFile": "/Users/thousandmiles/.ohos/config/default_LexiClash_Wund81-BZqzIqUJd6nXRGJMIBlGBx4RxSPMpHh0_Nyo=.p12",
-          "storePassword": "0000001BB198F80CC8CBCE57BC4209796DAC9C76F56F5209F6F2507FA5BCC9379B15C908E4F903C15BA03B"
+          "storePassword": "0000001B1EAE9A6ADC3A5B7DE484EA3A42A9B92A7769C0FBA6889352262DB8A064E820693C07C8687D1C89"
         }
       }
     ],

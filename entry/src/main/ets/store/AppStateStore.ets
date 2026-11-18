@@ -292,6 +292,7 @@ export class AppStateStore {
         clearInterval(this.tickerId);
         this.tickerId = -1;
       }
+      this.liveConnections = [];
       this.persistState();
       return;
     }
@@ -341,6 +342,7 @@ export class AppStateStore {
     this.coreHomeDir = filesDir + '/clash';
     this.core.initCore(this.coreHomeDir);
     this.vpnManager.setFilesDir(filesDir);
+    this.vpnManager.enableBackgroundWatchdog();
     const raw: string = this.repository.initialize(filesDir);
     if (raw.length === 0) {
       this.refreshIntranetIpAsync();
@@ -420,9 +422,14 @@ export class AppStateStore {
       this.appendLog('error', 'Storage', 'Load', this.lastOperationError);
     }
     this.refreshIntranetIpAsync();
-    this.restoreExistingVpnSessionAsync();
-    if (this.autoRun && this.core.isReady() && this.profiles.length > 0 && !this.isRunning) {
-      this.toggleRunningAsync();
+    if (this.autoRun && this.core.isReady() && this.profiles.length > 0 && !this.vpnManager.shouldKeepVpnRunning()) {
+      this.restoreExistingVpnSessionAsync().then((): void => {
+        if (this.autoRun && this.core.isReady() && this.profiles.length > 0 && !this.isRunning && !this.isVpnTransitioning) {
+          this.toggleRunningAsync();
+        }
+      });
+    } else {
+      this.restoreExistingVpnSessionAsync();
     }
   }
 
@@ -875,6 +882,13 @@ export class AppStateStore {
           this.vpnManager.getRuntimeStatus().sessionId !== status.sessionId) { return; }
         this.lastSystemVpnCheckAt = Date.now();
         if (!active) {
+          if (this.vpnManager.shouldKeepVpnRunning()) {
+            const recovered: boolean = await this.vpnManager.recoverVpnIfInterrupted('foreground-system-vpn-lost');
+            if (recovered) {
+              this.lastSystemVpnCheckAt = Date.now();
+              return;
+            }
+          }
           this.markVpnDisconnected('系统 VPN 连接已断开，请重新连接');
           return;
         }
@@ -967,6 +981,13 @@ export class AppStateStore {
       // Keep a single transient query failure from clearing a live tunnel, but
       // do not display a dead extension's cached 'running' state indefinitely.
       if (this.liveStatsFailureCount >= 3 && !this.vpnManager.runtimeIsFresh(status) && !this.isVpnTransitioning) {
+        if (this.vpnManager.shouldKeepVpnRunning()) {
+          const recovered: boolean = await this.vpnManager.recoverVpnIfInterrupted('foreground-controller-stalled');
+          if (recovered) {
+            this.liveStatsFailureCount = 0;
+            return;
+          }
+        }
         this.markVpnDisconnected('VPN 服务已停止响应，请重新连接');
       } else if (this.liveStatsFailureCount === 1) {
         RuntimeDiagnostics.record(`VPN health query failed: ${String(error)}`);
@@ -1137,7 +1158,7 @@ export class AppStateStore {
         this.lastTrafficSampleAt = 0;
         this.lastUploadTotalSample = 0;
         this.lastDownloadTotalSample = 0;
-        this.appendLog('info', 'Core', 'Runtime', 'VPN TUN & mihomo connected');
+        this.appendLog('info', 'Core', 'Runtime', `VPN TUN & mihomo connected (${this.vpnManager.getKeepAliveStatus()})`);
         this.notify();
         this.refreshOutboundIp();
         this.recheckAllServices();

@@ -32,6 +32,41 @@ export class ImmersivePageTransition {
     }
   }
 
+  static isAnimated(): boolean {
+    return !ImmersivePageTransition.isReduceMotionEnabled();
+  }
+
+  static systemTransitionType(): NavigationSystemTransitionType {
+    return ImmersivePageTransition.isReduceMotionEnabled()
+      ? NavigationSystemTransitionType.NONE
+      : NavigationSystemTransitionType.DEFAULT;
+  }
+
+  static push(stack: NavPathStack, name: string): void {
+    const names: string[] = stack.getAllPathName();
+    if (names.length > 0 && names[names.length - 1] === name) {
+      return;
+    }
+    stack.pushPath(new NavPathInfo(name, undefined), {
+      launchMode: LaunchMode.MOVE_TO_TOP_SINGLETON,
+      animated: ImmersivePageTransition.isAnimated()
+    });
+  }
+
+  static pop(stack: NavPathStack): boolean {
+    if (stack.size() <= 0) {
+      return false;
+    }
+    stack.pop(ImmersivePageTransition.isAnimated());
+    return true;
+  }
+
+  static clear(stack: NavPathStack): void {
+    if (stack.size() > 0) {
+      stack.clear(ImmersivePageTransition.isAnimated());
+    }
+  }
+
   /** Secondary page enter/exit transitions matching LumiKit's cubic-bezier fade + horizontal slide. */
   static secondaryPage(): TransitionEffect {
     if (ImmersivePageTransition.isReduceMotionEnabled()) {

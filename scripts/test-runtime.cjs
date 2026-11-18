@@ -24,8 +24,10 @@ function runtime({
     startCalls: [], stopCalls: [], tunCreates: [], tunDestroyed: 0, closedFds: [],
     nativeLaunchCalls: [], proxyLaunchCalls: [], nativeStartTunCalls: [], nativeStopCalls: 0,
     physicalNetId: 100, netConnections: [], keepAliveStarts: [], keepAliveStops: 0,
-    keepAliveCancelCb: null, notifications: [], keepAliveStoppedIds: [], systemVpnActive: false,
-    systemVpnAddress: '172.19.0.1'
+    keepAliveCancelCb: null, keepAliveSuspendCb: null, keepAliveActiveCb: null, faultWatcher: null, notifications: [],
+    keepAliveStoppedIds: [], systemVpnActive: false, systemVpnAddress: '172.19.0.1',
+    suspendDelays: [], cancelledSuspendDelays: [], authPrompts: [],
+    runningLockHolds: [], runningLockUnholds: 0
   };
   const native = {
     nativeInitCore: () => JSON.stringify({ id: 0, result: loaded ? { initialized: true } : null, error: loaded ? null : 'CORE_UNAVAILABLE' }),
@@ -100,8 +102,9 @@ function runtime({
       createVpnConnection: () => ({
         create: async cfg => {
           vpnState.tunCreates.push(cfg);
+          const fd = vpnHooks.createTunFd ? await vpnHooks.createTunFd(cfg) : 77;
           vpnState.systemVpnActive = true;
-          return vpnHooks.createTunFd ? vpnHooks.createTunFd(cfg) : 77;
+          return fd;
         },
         destroy: async () => { vpnState.tunDestroyed++; vpnState.systemVpnActive = false; }
       })
@@ -141,7 +144,8 @@ function runtime({
       if (specifier === '@kit.CoreFileKit') return { fileIo: fakeFs };
       if (specifier === '@kit.NetworkKit') return network;
       if (specifier === '@kit.NotificationKit') return { notificationManager: {
-        SlotType: { LIVE_VIEW: 6 }, ContentType: { NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW: 5 },
+        SlotType: { SERVICE_INFORMATION: 2, LIVE_VIEW: 6 },
+        ContentType: { NOTIFICATION_CONTENT_BASIC_TEXT: 0, NOTIFICATION_CONTENT_SYSTEM_LIVE_VIEW: 5 },
         publish: async request => {
           if (vpnHooks.publishNotification) await vpnHooks.publishNotification(request);
           vpnState.notifications.push(request);
@@ -150,16 +154,71 @@ function runtime({
       if (specifier === '@kit.BackgroundTasksKit') return {
         backgroundTaskManager: {
           BackgroundMode: { DATA_TRANSFER: 1, TASK_KEEPING: 9 },
-          BackgroundTaskMode: { MODE_DATA_TRANSFER: 1, MODE_TASK_KEEPING: 9 },
-          BackgroundTaskSubmode: { SUBMODE_NORMAL_NOTIFICATION: 2, SUBMODE_LIVE_VIEW_NOTIFICATION: 3 },
+          BackgroundTaskMode: { MODE_DATA_TRANSFER: 1, MODE_TASK_KEEPING: 9, MODE_SPECIAL_SCENARIO_PROCESSING: 13 },
+          BackgroundTaskSubmode: {
+            SUBMODE_NORMAL_NOTIFICATION: 2,
+            SUBMODE_LIVE_VIEW_NOTIFICATION: 3,
+            SUBMODE_MEDIA_PROCESS_NORMAL_NOTIFICATION: 9
+          },
+          UserAuthResult: { NOT_SUPPORTED: 0, NOT_DETERMINED: 1, DENIED: 2, GRANTED_ONCE: 3, GRANTED_ALWAYS: 4 },
           ContinuousTaskCancelReason: { USER_CANCEL: 1, SYSTEM_CANCEL: 2 },
-          ContinuousTaskDetailedCancelReason: { USER_CANCEL_REMOVE_NOTIFICATION: 3, SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE: 12 },
-          ContinuousTaskRequest: class { isModeSupported() { return false; } },
-          on: (_type, cb) => { vpnState.keepAliveCancelCb = cb; },
+          ContinuousTaskDetailedCancelReason: {
+            USER_CANCEL_REMOVE_NOTIFICATION: 3,
+            SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE: 12,
+            SYSTEM_CANCEL_USER_UNAUTHORIZED: 14
+          },
+          ContinuousTaskSuspendReason: {
+            SYSTEM_SUSPEND_DATA_TRANSFER_LOW_SPEED: 4,
+            SYSTEM_SUSPEND_USER_UNAUTHORIZED: 19
+          },
+          ContinuousTaskRequest: class {
+            isModeSupported() {
+              if (typeof vpnHooks.specialScenarioSupported === 'boolean') return vpnHooks.specialScenarioSupported;
+              return true;
+            }
+            async checkSpecialScenarioAuthResult() {
+              if (vpnHooks.checkSpecialScenarioAuthResult) return vpnHooks.checkSpecialScenarioAuthResult();
+              return typeof vpnHooks.specialScenarioAuth === 'number' ? vpnHooks.specialScenarioAuth : 1;
+            }
+            async checkSpecialScenarioAuth() {
+              if (vpnHooks.checkSpecialScenarioAuth) return vpnHooks.checkSpecialScenarioAuth();
+              return typeof vpnHooks.specialScenarioAuth === 'number' ? vpnHooks.specialScenarioAuth : 1;
+            }
+            requestAuthFromUserByDialog(_ctx, cb) {
+              vpnState.authPrompts.push('dialog');
+              if (vpnHooks.requestAuthFromUserByDialog) return vpnHooks.requestAuthFromUserByDialog(_ctx, cb);
+              cb(typeof vpnHooks.specialScenarioDialogResult === 'number' ? vpnHooks.specialScenarioDialogResult : 4);
+            }
+            requestAuthFromUser(_ctx, cb) {
+              vpnState.authPrompts.push('banner');
+              if (vpnHooks.requestAuthFromUser) return vpnHooks.requestAuthFromUser(_ctx, cb);
+              cb(typeof vpnHooks.specialScenarioDialogResult === 'number' ? vpnHooks.specialScenarioDialogResult : 3);
+            }
+          },
+          on: (type, cb) => {
+            if (type === 'continuousTaskCancel') vpnState.keepAliveCancelCb = cb;
+            else if (type === 'continuousTaskSuspend') vpnState.keepAliveSuspendCb = cb;
+            else if (type === 'continuousTaskActive') vpnState.keepAliveActiveCb = cb;
+          },
+          requestSuspendDelay: (reason, _cb) => {
+            const requestId = vpnState.suspendDelays.length + 101;
+            vpnState.suspendDelays.push({ requestId, reason });
+            return { requestId, actualDelayTime: 180000 };
+          },
+          cancelSuspendDelay: id => {
+            vpnState.cancelledSuspendDelays.push(id);
+          },
           startBackgroundRunning: async (_ctx, mode) => {
             vpnState.keepAliveStarts.push(mode);
             if (vpnHooks.startBackgroundRunning) return vpnHooks.startBackgroundRunning(mode);
-            return { notificationId: 71, continuousTaskId: 91 };
+            const modes = Array.from(mode?.backgroundTaskModes || []);
+            if (modes.includes(13)) {
+              return { notificationId: 72, continuousTaskId: 92, slotType: 2, contentType: 0 };
+            }
+            if (modes.includes(9)) {
+              return { notificationId: 73, continuousTaskId: 93, slotType: 2, contentType: 0 };
+            }
+            return { notificationId: 71, continuousTaskId: 91, slotType: 6, contentType: 5 };
           },
           stopBackgroundRunning: async (_ctx, id) => {
             vpnState.keepAliveStops += 1;
@@ -169,16 +228,44 @@ function runtime({
         }
       };
       if (specifier === '@kit.AbilityKit') return {
+        abilityAccessCtrl: {
+          GrantStatus: { PERMISSION_GRANTED: 0, PERMISSION_DENIED: -1 },
+          createAtManager: () => ({
+            checkAccessToken: async (_tokenId, perm) => {
+              if (perm === 'ohos.permission.KEEP_BACKGROUND_RUNNING_SPECIAL_SCENARIO' && vpnHooks.specialScenarioPermission) {
+                return 0;
+              }
+              return -1;
+            }
+          })
+        },
+        bundleManager: {
+          BundleFlag: { GET_BUNDLE_INFO_WITH_APPLICATION: 1 },
+          getBundleInfoForSelf: async () => ({ appInfo: { accessTokenId: 12345 } })
+        },
         wantAgent: {
           OperationType: { START_ABILITY: 1 },
           WantAgentFlags: { UPDATE_PRESENT_FLAG: 3 },
           getWantAgent: async info => info
         }
       };
-      if (specifier === '@kit.BasicServicesKit') return {};
+      if (specifier === '@kit.BasicServicesKit') return {
+        deviceInfo: {
+          get deviceType() { return vpnHooks.deviceType || 'phone'; }
+        },
+        runningLock: {
+          RunningLockType: { BACKGROUND_USER_IDLE: 129 },
+          isSupported: () => vpnHooks.runningLockSupported !== false,
+          create: async (name, type) => ({
+            hold: timeout => { vpnState.runningLockHolds.push({ name, type, timeout }); },
+            isHolding: () => vpnState.runningLockHolds.length > vpnState.runningLockUnholds,
+            unhold: () => { vpnState.runningLockUnholds++; }
+          })
+        }
+      };
       if (specifier === '@kit.PerformanceAnalysisKit') return {
         hilog: { info() {}, warn() {}, error() {}, debug() {} },
-        hiAppEvent: { addWatcher() {}, EventType: { FAULT: 1 }, domain: { OS: 'OS' },
+        hiAppEvent: { addWatcher(w) { vpnState.faultWatcher = w; }, EventType: { FAULT: 1 }, domain: { OS: 'OS' },
           event: { APP_CRASH: 'APP_CRASH', APP_FREEZE: 'APP_FREEZE', APP_KILLED: 'APP_KILLED', RESOURCE_OVERLIMIT: 'RESOURCE_OVERLIMIT' } }
       };
       if (specifier === 'libclash_bridge.so') return native;
@@ -1108,9 +1195,14 @@ test('KeepAlive: an open-ended transfer stays unfinished while displaying real t
     for (const notification of r.vpnState.notifications) {
       assert.equal(notification.id, 71);
       assert.equal(notification.template.name, 'downloadTemplate');
-      assert.equal(notification.template.data.progressValue, 0);
+      assert.ok(notification.template.data.progressValue >= 1 && notification.template.data.progressValue <= 99);
       assert.equal(notification.template.data.fileName, '已传输 3.00 MiB');
     }
+    assert.notEqual(
+      r.vpnState.notifications[1].template.data.progressValue,
+      r.vpnState.notifications[0].template.data.progressValue,
+      'Rolling progressValue must advance on idle updates to prevent 10-minute TASK_DETECTION cancel'
+    );
     await r.BackgroundKeepAlive.stop();
     assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
   } finally { r.dispose(); }
@@ -1129,7 +1221,7 @@ test('KeepAlive: a rejected initial notification rolls back its task and leaves 
     await r.BackgroundKeepAlive.stop();
     await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 0);
     assert.equal(r.BackgroundKeepAlive.isActive(), true);
-    assert.equal(r.vpnState.notifications[0].template.data.progressValue, 0);
+    assert.ok(r.vpnState.notifications[0].template.data.progressValue >= 1 && r.vpnState.notifications[0].template.data.progressValue <= 99);
     await r.BackgroundKeepAlive.stop();
     assert.equal(r.vpnState.keepAliveStops, 2);
   } finally { r.dispose(); }
@@ -1212,7 +1304,8 @@ test('KeepAlive: a transient refresh failure is visible and the next real update
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(r.BackgroundKeepAlive.getLastError(), '');
     assert.equal(r.vpnState.keepAliveStarts.length, 1);
-    assert.equal(r.vpnState.notifications.at(-1).template.data.progressValue, 0);
+    const lastProg = r.vpnState.notifications.at(-1).template.data.progressValue;
+    assert.ok(lastProg >= 1 && lastProg <= 99);
     await r.BackgroundKeepAlive.stop();
   } finally { r.dispose(); }
 });
@@ -1794,6 +1887,346 @@ for (const staleDisabledSetting of [false, true]) {
     } finally { r.dispose(); }
   });
 }
+
+test('KeepAlive & Watchdog: recovers killed VPN extension on LowMemoryKill and keeps publishing live view notifications', async () => {
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); }
+  } });
+  try {
+    r.RuntimeDiagnostics.watch('/sandbox', 'ui');
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test', mode: 'rule', uploadTotal: 2048, downloadTotal: 4096, connections: [] });
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.startCalls.length, 1);
+    const firstSession = JSON.parse(r.disk.get('/sandbox/vpn-command.json')).sessionId;
+
+    // Simulate OS LowMemoryKill terminating com.lovexjy.lexiclash:vpn in the background.
+    r.vpnState.systemVpnActive = false;
+    r.vpnState.faultWatcher.onReceive('OS', [{
+      appEventInfos: [{
+        name: 'APP_KILLED',
+        params: {
+          time: Date.now(),
+          foreground: false,
+          reason: 'LowMemoryKill',
+          last_exit_detail_info: {
+            pid: '22442',
+            process_name: 'com.lovexjy.lexiclash:vpn',
+            kill_reason: 'LowMemoryKill',
+            pss: '238220'
+          }
+        }
+      }]
+    }]);
+
+    const waitDeadline = Date.now() + 2000;
+    while (Date.now() < waitDeadline && r.vpnState.startCalls.length < 2) {
+      await new Promise(res => setTimeout(res, 20));
+    }
+    assert.equal(r.vpnState.startCalls.length, 2, 'Watchdog should automatically relaunch LexiVpnExtension');
+    const recoveredSession = JSON.parse(r.disk.get('/sandbox/vpn-command.json')).sessionId;
+    assert.notEqual(recoveredSession, firstSession);
+    assert.equal(r.vpnState.systemVpnActive, true);
+    const combinedLog = (r.disk.get('/sandbox/runtime-ui.log') || '') + '\n' + (r.disk.get('/sandbox/runtime-vpn.log') || '');
+    assert.match(combinedLog, /process=com\.lovexjy\.lexiclash:vpn/);
+    assert.match(combinedLog, /VPN session recovered in background/);
+    await r.store.toggleRunningAsync();
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: periodic refresh falls back to cached bytes when readBytes throws so OS never cancels for 10-min silence', async () => {
+  let shouldThrow = false;
+  const r = runtime({ realTimers: true });
+  try {
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => {
+      if (shouldThrow) throw { code: 2300007, message: 'Failed to connect to the server' };
+      return 5242880;
+    });
+    assert.equal(r.vpnState.notifications.length, 1);
+    shouldThrow = true;
+    await new Promise(res => setTimeout(res, 25));
+    assert.ok(r.vpnState.notifications.length >= 2, 'Notification must still be published using cached bytes');
+    assert.equal(r.vpnState.notifications.at(-1).template.data.fileName, '已传输 5.00 MiB');
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive & Watchdog: continuousTaskSuspend clears active state, stops suspended task, and re-arms keep-alive without dropping healthy VPN', async () => {
+  let extension;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: () => { if (extension) extension.onDestroy(); }
+  } });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test', mode: 'rule', uploadTotal: 1024, downloadTotal: 2048, connections: [] });
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.keepAliveStarts.length, 1);
+    assert.equal(r.vpnState.startCalls.length, 1);
+
+    // Non-suspended state updates must not tear down the task.
+    r.vpnState.keepAliveSuspendCb({ continuousTaskId: 91, suspendState: false, suspendReason: 4 });
+    assert.equal(r.vpnState.keepAliveStarts.length, 1);
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+
+    // OS suspends continuous task due to low speed -> watchdog stops old task and re-arms keep-alive.
+    r.vpnState.keepAliveSuspendCb({ continuousTaskId: 91, suspendState: true, suspendReason: 4 });
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && r.vpnState.keepAliveStarts.length < 2) {
+      await new Promise(res => setTimeout(res, 15));
+    }
+    assert.equal(r.vpnState.keepAliveStarts.length, 2);
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [91]);
+    assert.equal(r.vpnState.startCalls.length, 1, 'Healthy VPN tunnel must not restart');
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    await r.store.toggleRunningAsync();
+  } finally { r.dispose(); }
+});
+
+test('VPN recovery: skips relaunch while user stopVpn is in flight and waits for extension teardown before restart', async () => {
+  let extension;
+  let stopGate = null;
+  const r = runtime({ loaded: true, realTimers: true, vpnHooks: {
+    onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+    onStopAbility: async () => {
+      if (extension) extension.onDestroy();
+      if (stopGate) await stopGate;
+    }
+  } });
+  try {
+    r.RuntimeDiagnostics.watch('/sandbox', 'ui');
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test', mode: 'rule', uploadTotal: 1024, downloadTotal: 2048, connections: [] });
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.startCalls.length, 1);
+
+    // Start disconnecting; a fault notification arriving during teardown must not relaunch VPN.
+    let resolveStopGate;
+    stopGate = new Promise(res => { resolveStopGate = res; });
+    const stopping = r.store.toggleRunningAsync();
+    await new Promise(res => setTimeout(res, 10));
+    const recoveredDuringStop = await r.store.vpnManager.recoverVpnIfInterrupted('vpn-process-died:test');
+    assert.equal(recoveredDuringStop, false);
+    resolveStopGate();
+    await stopping;
+    assert.equal(r.vpnState.startCalls.length, 1);
+    assert.equal(r.store.isRunning, false);
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: uses MODE_SPECIAL_SCENARIO_PROCESSING with dialog consent and survives non-fatal basic notification failures', async () => {
+  let extension;
+  let rejectBasicNotification = true;
+  const r = runtime({
+    loaded: true,
+    realTimers: true,
+    vpnHooks: {
+      specialScenarioPermission: true,
+      specialScenarioAuth: 1,
+      specialScenarioDialogResult: 4,
+      onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+      onStopAbility: () => { if (extension) extension.onDestroy(); },
+      publishNotification: req => {
+        if (rejectBasicNotification && req.content?.notificationContentType === 0) {
+          throw { code: 1600004, message: 'Notification slot mismatched or muted' };
+        }
+      }
+    }
+  });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test', mode: 'rule', uploadTotal: 1024, downloadTotal: 2048, connections: [] });
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.deepEqual(Array.from(r.vpnState.authPrompts), ['dialog']);
+    assert.equal(r.vpnState.keepAliveStarts.length, 1);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskModes), [13]);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskSubmodes), [9]);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'specialScenario');
+    assert.equal(r.BackgroundKeepAlive.getLastStatus(), 'running:specialScenario');
+    assert.equal(r.BackgroundKeepAlive.isActive(), true);
+    assert.equal(r.vpnState.runningLockHolds.length, 0, 'specialScenario ACL mode must not acquire non-ACL RunningLock');
+    rejectBasicNotification = false;
+    await new Promise(res => setTimeout(res, 25));
+    assert.ok(r.vpnState.notifications.some(n => n.id === 72 && n.content?.notificationContentType === 0));
+    await r.store.toggleRunningAsync();
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [92]);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'none');
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive: falls back to MODE_DATA_TRANSFER when special scenario consent is denied or unauthorized in background', async () => {
+  let authState = 1;
+  const r = runtime({
+    loaded: true,
+    realTimers: true,
+    vpnHooks: {
+      specialScenarioPermission: true,
+      checkSpecialScenarioAuthResult: () => authState,
+      specialScenarioDialogResult: 2
+    }
+  });
+  try {
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 4096, true);
+    assert.deepEqual(Array.from(r.vpnState.authPrompts), ['dialog']);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'dataTransfer');
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskModes), [1]);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskSubmodes), [3]);
+    await r.BackgroundKeepAlive.stop();
+
+    // Background recovery (!userInitiated) with NOT_DETERMINED must not pop dialog and must fall back cleanly.
+    r.vpnState.authPrompts.length = 0;
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 8192, false);
+    assert.equal(r.vpnState.authPrompts.length, 0);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'dataTransfer');
+
+    // Authorized special scenario that later receives SYSTEM_CANCEL_USER_UNAUTHORIZED (14) clears specialScenario mode.
+    await r.BackgroundKeepAlive.stop();
+    authState = 4;
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 16384, true);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'specialScenario');
+    r.vpnState.keepAliveCancelCb({ id: 92, reason: 2, detailedReason: 14 });
+    assert.equal(r.BackgroundKeepAlive.isActive(), false);
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 16384, false);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'dataTransfer');
+    await r.BackgroundKeepAlive.stop();
+  } finally { r.dispose(); }
+});
+
+test('VPN watchdog: shields recovery with suspend delay, detects background TUN loss, and retries 2203002 collision', async () => {
+  let extension;
+  let createCalls = 0;
+  let trigger2203002Once = false;
+  const r = runtime({
+    loaded: true,
+    realTimers: true,
+    vpnHooks: {
+      specialScenarioPermission: true,
+      specialScenarioAuth: 4,
+      onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+      onStopAbility: () => { if (extension) extension.onDestroy(); },
+      createTunFd: () => {
+        createCalls++;
+        if (trigger2203002Once) {
+          trigger2203002Once = false;
+          throw { code: 2203002, message: 'VPN connection already exists' };
+        }
+        return 77 + createCalls;
+      }
+    }
+  });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    const largeConnections = Array.from({ length: 120 }, (_, i) => ({
+      id: `c${i}`,
+      metadata: { host: `host-${i}.example.com`, destinationIP: '198.51.100.1', network: 'TCP' },
+      chains: ['Exit']
+    }));
+    r.httpState.response.result = JSON.stringify({
+      version: 'mihomo-test',
+      mode: 'rule',
+      uploadTotal: 2048,
+      downloadTotal: 4096,
+      connections: largeConnections
+    });
+    assert.ok(r.httpState.response.result.length > 8192);
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.vpnState.startCalls.length, 1);
+
+    // Move app to background (stops 1s UI ticker) and drop the TUN silently while HTTP stays responsive.
+    r.store.setAppInForeground(false);
+    trigger2203002Once = true;
+    r.vpnState.systemVpnActive = false;
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && r.vpnState.startCalls.length < 2) {
+      await new Promise(res => setTimeout(res, 15));
+    }
+    assert.ok(r.vpnState.startCalls.length >= 2, 'Background periodic probe should detect missing TUN and recover extension');
+    assert.ok(createCalls >= 3, 'Extension should retry transient 2203002 collision on quick recovery');
+    assert.equal(r.vpnState.systemVpnActive, true);
+    assert.ok(r.vpnState.suspendDelays.length >= 1);
+    assert.deepEqual(
+      Array.from(r.vpnState.cancelledSuspendDelays),
+      r.vpnState.suspendDelays.map(d => d.requestId)
+    );
+    await r.store.toggleRunningAsync();
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive non-ACL phone: rolls progressValue 1..99, holds/renews RunningLock, and relays suspend delay', async () => {
+  let extension;
+  const r = runtime({
+    loaded: true,
+    realTimers: true,
+    vpnHooks: {
+      specialScenarioPermission: false,
+      deviceType: 'phone',
+      onStartAbility: () => { extension = new r.LexiVpnExtension(); extension.onCreate(); },
+      onStopAbility: () => { if (extension) extension.onDestroy(); }
+    }
+  });
+  try {
+    await r.store.addNewProfile('主配置', '', 'file', fixture);
+    r.httpState.response.result = JSON.stringify({ version: 'mihomo-test', mode: 'rule', uploadTotal: 1024, downloadTotal: 2048, connections: [] });
+    assert.equal(await r.store.toggleRunningAsync(), true);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'dataTransfer');
+    assert.equal(r.BackgroundKeepAlive.getLastStatus(), 'running:dataTransfer');
+    assert.ok(r.vpnState.runningLockHolds.length >= 1);
+    assert.equal(r.vpnState.runningLockHolds[0].type, 129);
+    assert.equal(r.vpnState.runningLockHolds[0].timeout, 300000);
+
+    await new Promise(res => setTimeout(res, 25));
+    const progresses = r.vpnState.notifications.map(n => n.template?.data?.progressValue);
+    assert.ok(progresses.length >= 2);
+    assert.ok(progresses.every(p => p >= 1 && p <= 99));
+    assert.notEqual(progresses[1], progresses[0]);
+    assert.ok(r.vpnState.runningLockHolds.length >= 2, 'Periodic tick must renew RunningLock window');
+
+    // Simulate OS continuousTaskSuspend -> must unhold lock, acquire relay suspend delay, re-arm, and release relay delay.
+    r.vpnState.keepAliveSuspendCb({ continuousTaskId: 91, suspendState: true, suspendReason: 4 });
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline && r.vpnState.keepAliveStarts.length < 2) {
+      await new Promise(res => setTimeout(res, 15));
+    }
+    assert.equal(r.vpnState.keepAliveStarts.length, 2);
+    assert.ok(r.vpnState.suspendDelays.some(d => d.reason === 'keepalive-suspend-relay'));
+    assert.ok(r.vpnState.runningLockUnholds >= 1);
+    assert.deepEqual(
+      Array.from(r.vpnState.cancelledSuspendDelays),
+      r.vpnState.suspendDelays.map(d => d.requestId)
+    );
+    await r.store.toggleRunningAsync();
+    assert.ok(r.vpnState.runningLockUnholds >= 2, 'Stopping VPN must release RunningLock');
+  } finally { r.dispose(); }
+});
+
+test('KeepAlive non-ACL 2in1: uses MODE_TASK_KEEPING natively and manages RunningLock', async () => {
+  const r = runtime({
+    realTimers: true,
+    vpnHooks: {
+      specialScenarioPermission: false,
+      deviceType: '2in1'
+    }
+  });
+  try {
+    await r.BackgroundKeepAlive.start('com.lovexjy.lexiclash', 'EntryAbility', async () => 65536, true);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'taskKeeping');
+    assert.equal(r.BackgroundKeepAlive.getLastStatus(), 'running:taskKeeping');
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskModes), [9]);
+    assert.deepEqual(Array.from(r.vpnState.keepAliveStarts[0].backgroundTaskSubmodes), [2]);
+    assert.equal(r.vpnState.runningLockHolds.length, 1);
+    assert.equal(r.vpnState.runningLockHolds[0].type, 129);
+    await new Promise(res => setTimeout(res, 25));
+    assert.ok(r.vpnState.notifications.some(n => n.id === 73 && n.content?.notificationContentType === 0));
+    assert.ok(r.vpnState.runningLockHolds.length >= 2);
+    await r.BackgroundKeepAlive.stop();
+    assert.deepEqual(r.vpnState.keepAliveStoppedIds, [93]);
+    assert.equal(r.vpnState.runningLockUnholds, 1);
+    assert.equal(r.BackgroundKeepAlive.getActiveMode(), 'none');
+  } finally { r.dispose(); }
+});
 
 (async () => {
   let failed = 0;

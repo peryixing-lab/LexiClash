@@ -2,7 +2,7 @@ import { vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { launchAsync, startTunAsync, getTunError, stopAsync } from 'libclash_bridge.so';
+import { launchAsync, startTunAsync, getTunError, stopAsync, invoke } from 'libclash_bridge.so';
 import { VpnRuntimeManager } from '../core/VpnRuntimeManager';
 import { RuntimeDiagnostics } from '../core/RuntimeDiagnostics';
 import { AppAccessControl, LexiAppAccessPolicy } from '../core/AppAccessControl';
@@ -52,6 +52,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
   private networkManager: VpnRuntimeManager = new VpnRuntimeManager();
   private networkTimer: number = -1;
   private lastHeartbeat: number = 0;
+  private lastCoreGcAt: number = 0;
   private accessControl: LexiAppAccessPolicy = AppAccessControl.unrestricted();
   private tunSettings: LexiTunSettings = TunConfig.defaults();
 
@@ -73,7 +74,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       return;
     }
     this.publishStatus('starting');
-    this.commandTimer = setInterval((): void => { this.pollCommand(); }, 250);
+    this.commandTimer = setInterval((): void => { this.pollCommand(); }, 1000);
     this.startup = this.start(command.secret);
   }
 
@@ -101,10 +102,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
     fs.renameSync(temporary, targetPath);
   }
 
-  private publishStatus(status: string, error: string = ''): void {
-    this.status = status;
-    this.statusError = error;
-    if (!this.ownsSession()) { return; }
+  private writeStatusSnapshot(status: string, error: string = ''): void {
     const data: VpnRuntimeStatus = {
       sessionId: this.sessionId,
       status: status,
@@ -122,14 +120,56 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
     }
   }
 
+  private publishStatus(status: string, error: string = ''): void {
+    this.status = status;
+    this.statusError = error;
+    if (!this.ownsSession()) { return; }
+    this.writeStatusSnapshot(status, error);
+  }
+
   private pollCommand(): void {
     const command: VpnCommand | undefined = this.readCommand();
     if (!command || command.sessionId !== this.sessionId || command.action !== 'start') {
       this.requestStop();
       return;
     }
-    if (Date.now() - this.lastHeartbeat >= 2000) {
-      this.publishStatus(this.status, this.statusError);
+    const now: number = Date.now();
+    if (now - this.lastHeartbeat >= 2000) {
+      this.writeStatusSnapshot(this.status, this.statusError);
+    }
+    if (this.status === 'running' && !this.cancelled && now - this.lastCoreGcAt >= 90000) {
+      this.lastCoreGcAt = now;
+      if (typeof invoke === 'function') {
+        try {
+          invoke('{"id":"gc","method":"forceGc","arguments":{}}');
+        } catch (_gcErr) {
+          // Non-fatal maintenance GC
+        }
+      }
+    }
+  }
+
+  private async createTunWithRetry(connectionObj: vpnExtension.VpnConnection,
+    config: vpnExtension.VpnConfig): Promise<number> {
+    const delays: number[] = [350, 700];
+    for (let attempt: number = 0; ; attempt++) {
+      this.checkStartAllowed();
+      try {
+        return await connectionObj.create(config);
+      } catch (err) {
+        const vpnError: BusinessError = err as BusinessError;
+        if (vpnError.code === 2203002) {
+          if (attempt < delays.length) {
+            RuntimeDiagnostics.record(`VPN TUN create hit 2203002, waiting ${delays[attempt]}ms for prior interface release`);
+            await new Promise<void>((resolve: () => void): void => {
+              setTimeout(resolve, delays[attempt]);
+            });
+            continue;
+          }
+          throw new Error('系统已有 VPN 连接，请先断开其他 VPN 后重试（2203002）');
+        }
+        throw err instanceof Error ? err : new Error(vpnError.message || String(err));
+      }
     }
   }
 
@@ -186,7 +226,7 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
         isIPv6Accepted: true
       };
       AppAccessControl.configureVpn(config, this.accessControl);
-      this.pendingFd = await this.connection.create(config);
+      this.pendingFd = await this.createTunWithRetry(this.connection, config);
       this.connectionCreated = true;
       hilog.info(DOMAIN, 'LexiClashVPN', 'VPN TUN created');
       this.checkStartAllowed();
@@ -201,10 +241,12 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       const session: VpnSession = { sessionId: this.sessionId, startedAt: Date.now() };
       this.writeJson('vpn-session.json', JSON.stringify(session));
       this.networkManager.setFilesDir(this.context.filesDir);
+      this.networkManager.setSecret(secret);
       this.networkManager.startNetworkWatch((_changed: boolean, netId: number): void => {
         clearTimeout(this.networkTimer);
         this.networkTimer = setTimeout((): void => { this.refreshUpstream(netId); }, 1500);
       });
+      this.lastCoreGcAt = Date.now();
       this.publishStatus('running');
       hilog.info(DOMAIN, 'LexiClashVPN', 'Native TUN started');
       return;
@@ -234,6 +276,14 @@ export default class LexiVpnExtension extends VpnExtensionAbility {
       if (this.cancelled || !this.ownsSession()) { return; }
       // New sockets select the current physical network in socket_ohos.go.
       await this.networkManager.closeAllConnections();
+      if (typeof invoke === 'function') {
+        try {
+          invoke('{"id":"gc","method":"forceGc","arguments":{}}');
+          this.lastCoreGcAt = Date.now();
+        } catch (_gcErr) {
+          // Non-fatal maintenance GC
+        }
+      }
       RuntimeDiagnostics.record(`VPN upstream connections refreshed netId=${netId}`);
     } catch (err) {
       RuntimeDiagnostics.record(`VPN upstream refresh failed: ${String(err)}`);

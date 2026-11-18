@@ -1,4 +1,4 @@
-import { uiMaterial } from '@kit.ArkUI';
+import { LengthMetrics, uiMaterial } from '@kit.ArkUI';
 import { FlClashColorPalette } from './ThemeManager';
 
 // Like LexiNote's title chips, keep native material on the controls themselves.
@@ -50,5 +50,24 @@ export class ImmersiveTitleStyle {
 
   static scrim(palette: FlClashColorPalette): string {
     return (palette.isDark ? '#E6' : '#00') + palette.page.substring(1);
+  }
+
+  static titleTheme(palette: FlClashColorPalette): CustomTheme {
+    return { colors: { compBackgroundGray: palette.page } };
+  }
+
+  static titleBarOptions(immersiveEnabled: boolean, scrollUnderTitle: boolean): NavigationTitleOptions {
+    return {
+      barStyle: BarStyle.STACK,
+      backgroundColor: Color.Transparent,
+      scrollEffectOptions: immersiveEnabled && scrollUnderTitle
+        ? {
+          scrollEffectType: ScrollEffectType.GRADUAL_BLUR,
+          blurEffectiveStartOffset: LengthMetrics.vp(8),
+          blurEffectiveEndOffset: LengthMetrics.vp(32)
+        }
+        : undefined,
+      systemMaterial: immersiveEnabled && scrollUnderTitle ? undefined : uiMaterial.Material.empty
+    };
   }
 }

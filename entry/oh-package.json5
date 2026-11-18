@@ -6,6 +6,7 @@
   "author": "peryixing-lab and contributors",
   "license": "GPL-3.0",
   "dependencies": {
-    "libclash_bridge.so": "file:./src/main/cpp/types/libclash_bridge"
+    "libclash_bridge.so": "file:./src/main/cpp/types/libclash_bridge",
+    "libvideo_editor.so": "file:./src/main/cpp/types/libvideo_editor"
   }
 }

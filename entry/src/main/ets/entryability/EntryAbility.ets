@@ -5,6 +5,7 @@ import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { BackgroundKeepAlive } from '../core/BackgroundKeepAlive';
 import { RuntimeDiagnostics } from '../core/RuntimeDiagnostics';
 import { AppStateStore } from '../store/AppStateStore';
+import { VideoEditorService } from '../core/VideoEditorService';
 
 const DOMAIN = 0x0000;
 
@@ -20,6 +21,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    VideoEditorService.getInstance().cancel('应用已关闭，导出已取消');
     BackgroundKeepAlive.setAbilityContext(null);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
@@ -65,9 +67,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    VideoEditorService.getInstance().onAppBackground();
     RuntimeDiagnostics.record(`UI background: keepAlive=${BackgroundKeepAlive.getLastStatus()} active=${BackgroundKeepAlive.isActive()}`);
     AppStateStore.getInstance().setAppInForeground(false);
-    AppStateStore.getInstance().persistState();
     // Ability has back to background
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }

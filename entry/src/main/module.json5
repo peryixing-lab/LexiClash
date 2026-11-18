@@ -27,6 +27,19 @@
       },
       {
         "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
+        "name": "ohos.permission.RUNNING_LOCK"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING_SPECIAL_SCENARIO",
+        "reason": "$string:special_scenario_background_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "always"
+        }
       }
     ],
     "abilities": [
@@ -40,7 +53,9 @@
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
         "backgroundModes": [
-          "dataTransfer"
+          "dataTransfer",
+          "specialScenarioProcessing",
+          "taskKeeping"
         ],
         "skills": [
           {

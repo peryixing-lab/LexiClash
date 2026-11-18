@@ -11,6 +11,14 @@
     {
       "name": "EntryAbility_label",
       "value": "LexiClash"
+    },
+    {
+      "name": "video_background_export_reason",
+      "value": "用于在您切换应用后继续完成视频片段编码和导出，完成或取消后立即停止后台任务。"
+    },
+    {
+      "name": "special_scenario_background_reason",
+      "value": "用于在应用退至后台后持续保持 VPN 网络代理连接与后台任务运行。"
     }
   ]
 }
